@@ -1,65 +1,127 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import { useState } from 'react';
+import Image from 'next/image';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardContent } from '@/components/ui/card';
+import { 
+  Search, 
+  QrCode, 
+  ShieldAlert, 
+  ArrowRight,
+  Info
+} from 'lucide-react';
+import { getTrees } from '@/lib/mockData';
+
+export default function HomePage() {
+  const router = useRouter();
+  const [treeId, setTreeId] = useState('');
+  const [searchError, setSearchError] = useState('');
+
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    setSearchError('');
+
+    const id = parseInt(treeId, 10);
+    const maxTrees = getTrees().length;
+    if (isNaN(id) || id < 1 || id > maxTrees) {
+      setSearchError(`Please enter a valid tree ID between 1 and ${maxTrees}.`);
+      return;
+    }
+
+    router.push(`/tree/${id}`);
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+    <div className="flex-1 flex flex-col justify-center items-center bg-background px-4 py-12 md:py-20">
+      <div className="w-full max-w-2xl text-center space-y-6">
+        {/* Reserve Logo */}
+        <div className="relative h-28 w-28 overflow-hidden rounded-full border border-primary bg-white mx-auto shadow-md">
+          <Image
+            src="/logo.png"
+            alt="Palamu Tiger Reserve Logo"
+            fill
+            className="object-cover"
+            priority
+          />
+        </div>
+
+        {/* Title */}
+        <div className="space-y-2">
+          <span className="text-xs font-bold tracking-widest text-primary uppercase bg-primary/10 px-3 py-1 rounded-full">
+            Department of Forests & Environment
+          </span>
+          <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl text-foreground">
+            Palamu Tiger Reserve
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+          <p className="text-base text-muted-foreground max-w-md mx-auto">
+            Official QR-based tree growth tracking and tending registry portal.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+
+        {/* Search Tree Form */}
+        <Card className="shadow-md border-border bg-card max-w-md mx-auto">
+          <CardContent className="p-6 space-y-4">
+            <h2 className="text-sm font-semibold text-foreground uppercase tracking-wider flex items-center justify-center gap-1.5">
+              <QrCode className="h-4 w-4 text-primary" /> Public Tree Lookup
+            </h2>
+            <form onSubmit={handleSearch} className="flex gap-2">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                <Input
+                  type="number"
+                  placeholder="Enter Tree ID (1 - 5)"
+                  value={treeId}
+                  onChange={(e) => setTreeId(e.target.value)}
+                  className="pl-9 h-11 border-border focus-visible:ring-primary font-medium"
+                />
+              </div>
+              <Button type="submit" className="bg-primary hover:bg-primary/95 text-white h-11 px-5">
+                Go
+              </Button>
+            </form>
+            {searchError && (
+              <p className="text-xs text-destructive text-left font-medium flex items-center gap-1">
+                <ShieldAlert className="h-3.5 w-3.5" />
+                {searchError}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Staff/Admin CTA Link */}
+        <div className="pt-4 flex flex-col sm:flex-row justify-center items-center gap-4 text-sm text-muted-foreground">
+          <Link 
+            href="/login" 
+            className="flex items-center gap-1 font-semibold text-primary hover:underline"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            Forest Guard / Staff Login
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+          <span className="hidden sm:inline opacity-40">|</span>
+          <Link 
+            href="/admin" 
+            className="flex items-center gap-1 font-semibold text-primary hover:underline"
           >
-            Documentation
-          </a>
+            Go to Admin Dashboard
+            <ArrowRight className="h-4 w-4" />
+          </Link>
         </div>
-      </main>
+
+        {/* Informational Blurb */}
+        <div className="max-w-md mx-auto bg-primary/5 border border-primary/10 p-4 rounded-xl flex gap-3 text-left text-xs leading-relaxed text-muted-foreground mt-8">
+          <Info className="h-5 w-5 text-primary shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold text-primary mb-0.5">Forest Monitoring Initiative (Demo Build)</p>
+            <p>
+              Each tree in the reserve is marked with a metallic tag containing a secure QR code. Scanning the tag instantly displays the tree's planting history, health status, and growth timeline.
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
