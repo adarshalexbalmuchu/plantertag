@@ -3,7 +3,7 @@
 import { useState, Suspense } from 'react';
 import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { signIn } from '@/lib/mockData';
+import { supabase } from '@/lib/supabase';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -25,19 +25,23 @@ function LoginForm() {
   // Get the redirect path from query params, fallback to /admin
   const redirectTo = searchParams.get('redirectTo') || '/admin';
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
 
-    // Simulated short delay to mimic a secure server response
-    setTimeout(() => {
-      signIn();
-      window.dispatchEvent(new Event('ptr_auth_change'));
+    const { data, error: loginErr } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (loginErr) {
+      setError(loginErr.message || 'Invalid email or password.');
       setLoading(false);
+    } else {
       router.push(redirectTo);
       router.refresh();
-    }, 500);
+    }
   };
 
   return (

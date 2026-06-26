@@ -1,178 +1,181 @@
--- =====================================================================
--- SUPABASE SCHEMA DDL - PALAMAU TIGER RESERVE (PTR) TREE TRACKER
--- =====================================================================
+-- SQL script to set up database schema for Palamu Tiger Reserve (PTR) Tree Tracker
 
--- 1. Create trees table
+-- 1. Create public tables
 CREATE TABLE IF NOT EXISTS public.trees (
-    id SERIAL PRIMARY KEY,
-    planter_name TEXT NOT NULL,
-    species TEXT NOT NULL,
-    planted_date DATE NOT NULL,
-    main_photo_url TEXT NOT NULL,
-    latitude NUMERIC(9, 6) NULL,
-    longitude NUMERIC(9, 6) NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+  id integer PRIMARY KEY,
+  planter_name text NOT NULL,
+  species text NOT NULL,
+  planted_date date NOT NULL,
+  main_photo_url text,
+  latitude numeric,
+  longitude numeric,
+  status text DEFAULT 'Healthy' CHECK (status IN ('Healthy', 'Needs Attention', 'Dead')),
+  created_at timestamptz DEFAULT now()
 );
 
--- 2. Create tree_logs table
 CREATE TABLE IF NOT EXISTS public.tree_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tree_id INT NOT NULL REFERENCES public.trees(id) ON DELETE CASCADE,
-    type TEXT NOT NULL CHECK (type IN ('photo', 'visit')),
-    photo_url TEXT NULL,
-    note TEXT NULL,
-    staff_name TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tree_id integer REFERENCES public.trees(id) ON DELETE CASCADE,
+  type text NOT NULL CHECK (type IN ('photo', 'visit')),
+  photo_url text,
+  note text,
+  log_latitude numeric,
+  log_longitude numeric,
+  staff_name text NOT NULL,
+  created_at timestamptz DEFAULT now()
 );
 
--- Create index on tree_id for faster lookup
-CREATE INDEX IF NOT EXISTS idx_tree_logs_tree_id ON public.tree_logs(tree_id);
+-- Create index on tree_id for performance
+CREATE INDEX IF NOT EXISTS tree_logs_tree_id_idx ON public.tree_logs (tree_id);
 
--- 3. Row-Level Security (RLS) Configuration
+-- 2. Idempotently add columns (for safe re-runs on existing databases)
+DO $$ 
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='trees' AND column_name='status'
+  ) THEN
+    ALTER TABLE public.trees ADD COLUMN status text DEFAULT 'Healthy' CHECK (status IN ('Healthy', 'Needs Attention', 'Dead'));
+  END IF;
 
--- Enable RLS
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='tree_logs' AND column_name='log_latitude'
+  ) THEN
+    ALTER TABLE public.tree_logs ADD COLUMN log_latitude numeric;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_name='tree_logs' AND column_name='log_longitude'
+  ) THEN
+    ALTER TABLE public.tree_logs ADD COLUMN log_longitude numeric;
+  END IF;
+END $$;
+
+-- 3. Enable Row Level Security (RLS)
 ALTER TABLE public.trees ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tree_logs ENABLE ROW LEVEL SECURITY;
 
--- Trees policies
--- SELECT: Anyone can read (public)
-CREATE POLICY "Allow public read trees" 
-ON public.trees FOR SELECT 
-USING (true);
+-- 4. Drop existing policies to avoid duplicate policy errors
+DROP POLICY IF EXISTS "Allow public read trees" ON public.trees;
+DROP POLICY IF EXISTS "Allow authenticated insert trees" ON public.trees;
+DROP POLICY IF EXISTS "Allow authenticated update trees" ON public.trees;
+DROP POLICY IF EXISTS "Allow public read tree_logs" ON public.tree_logs;
+DROP POLICY IF EXISTS "Allow authenticated insert tree_logs" ON public.tree_logs;
 
--- WRITE (INSERT, UPDATE, DELETE): Only authenticated users with user_metadata role = 'admin'
-CREATE POLICY "Allow admin write trees" 
-ON public.trees FOR ALL 
-TO authenticated 
-USING (COALESCE((auth.jwt() -> 'user_metadata' ->> 'role'), '') = 'admin')
-WITH CHECK (COALESCE((auth.jwt() -> 'user_metadata' ->> 'role'), '') = 'admin');
+-- 5. Create RLS Policies
+CREATE POLICY "Allow public read trees" ON public.trees
+  FOR SELECT USING (true);
 
--- Tree Logs policies
--- SELECT: Anyone can read (public)
-CREATE POLICY "Allow public read tree_logs" 
-ON public.tree_logs FOR SELECT 
-USING (true);
+CREATE POLICY "Allow authenticated insert trees" ON public.trees
+  FOR INSERT TO authenticated WITH CHECK (true);
 
--- INSERT: Only authenticated users (staff) can insert
-CREATE POLICY "Allow authenticated insert tree_logs" 
-ON public.tree_logs FOR INSERT 
-TO authenticated 
-WITH CHECK (true);
+CREATE POLICY "Allow authenticated update trees" ON public.trees
+  FOR UPDATE TO authenticated WITH CHECK (true);
 
--- DELETE/UPDATE: Only admin can delete or edit logs
-CREATE POLICY "Allow admin write tree_logs" 
-ON public.tree_logs FOR ALL 
-TO authenticated 
-USING (COALESCE((auth.jwt() -> 'user_metadata' ->> 'role'), '') = 'admin')
-WITH CHECK (COALESCE((auth.jwt() -> 'user_metadata' ->> 'role'), '') = 'admin');
+CREATE POLICY "Allow public read tree_logs" ON public.tree_logs
+  FOR SELECT USING (true);
 
+CREATE POLICY "Allow authenticated insert tree_logs" ON public.tree_logs
+  FOR INSERT TO authenticated WITH CHECK (true);
 
--- 4. Storage Bucket Setup for growth photos
--- Note: Create a bucket named 'growth_photos' in the Supabase Storage dashboard, and set it to public.
--- Below are the SQL commands to configure the storage policies.
-
+-- 6. Configure storage bucket policies for 'tree-photos'
 INSERT INTO storage.buckets (id, name, public) 
-VALUES ('growth_photos', 'growth_photos', true)
+VALUES ('tree-photos', 'tree-photos', true)
 ON CONFLICT (id) DO NOTHING;
 
--- Storage Read Policy: Allow anyone to view objects
-CREATE POLICY "Allow public read growth_photos" 
-ON storage.objects FOR SELECT 
-USING (bucket_id = 'growth_photos');
+DROP POLICY IF EXISTS "Allow public read tree-photos" ON storage.objects;
+DROP POLICY IF EXISTS "Allow authenticated upload tree-photos" ON storage.objects;
 
--- Storage Insert Policy: Allow authenticated staff to upload
-CREATE POLICY "Allow authenticated insert growth_photos" 
+CREATE POLICY "Allow public read tree-photos" 
+ON storage.objects FOR SELECT 
+USING (bucket_id = 'tree-photos');
+
+CREATE POLICY "Allow authenticated upload tree-photos" 
 ON storage.objects FOR INSERT 
 TO authenticated 
-WITH CHECK (bucket_id = 'growth_photos');
+WITH CHECK (bucket_id = 'tree-photos');
 
--- Storage Delete Policy: Allow admins to delete
-CREATE POLICY "Allow admin delete growth_photos" 
-ON storage.objects FOR DELETE 
-TO authenticated 
-USING (bucket_id = 'growth_photos' AND COALESCE((auth.jwt() -> 'user_metadata' ->> 'role'), '') = 'admin');
+-- 7. Seed 50 Trees (ON CONFLICT DO NOTHING)
+INSERT INTO public.trees (id, planter_name, species, planted_date, main_photo_url, latitude, longitude, status) VALUES
+(1, 'Birsa Oraon', 'Sal (Shorea robusta)', '2026-06-25', '/demo/tree_mature.png', 23.85412, 84.12345, 'Healthy'),
+(2, 'Karmi Munda', 'Mahua (Madhuca longifolia)', '2026-06-25', '/demo/tree_mature.png', 23.86125, 84.13560, 'Healthy'),
+(3, 'Sukhram Ho', 'Arjun (Terminalia arjuna)', '2026-06-25', '/demo/tree_growing.png', 23.84234, 84.11234, 'Healthy'),
+(4, 'Phulo Soren', 'Neem (Azadirachta indica)', '2026-06-25', '/demo/tree_sapling.png', 23.87112, 84.14876, 'Healthy'),
+(5, 'Lakhiram Tudu', 'Teak (Tectona grandis)', '2026-06-25', '/demo/tree_growing.png', 23.85900, 84.12990, 'Healthy'),
+(6, 'Ramesh Oraon', 'Semal (Bombax ceiba)', '2026-03-10', '/demo/tree_mature.png', 23.85500, 84.12500, 'Healthy'),
+(7, 'Sita Devi', 'Jamun (Syzygium cumini)', '2026-03-12', '/demo/tree_growing.png', 23.85610, 84.12610, 'Healthy'),
+(8, 'Sunil Munda', 'Bel (Aegle marmelos)', '2026-03-15', '/demo/tree_sapling.png', 23.85720, 84.12720, 'Needs Attention'),
+(9, 'Gita Kisku', 'Karanj (Millettia pinnata)', '2026-03-18', '/demo/tree_growing.png', 23.85830, 84.12830, 'Healthy'),
+(10, 'Anil Hembrom', 'Bamboo (Dendrocalamus strictus)', '2026-03-20', '/demo/tree_mature.png', 23.85940, 84.12940, 'Healthy'),
+(11, 'Rajesh Oraon', 'Sal (Shorea robusta)', '2026-04-01', '/demo/tree_growing.png', 23.86050, 84.13050, 'Healthy'),
+(12, 'Meena Munda', 'Mahua (Madhuca longifolia)', '2026-04-03', '/demo/tree_mature.png', 23.86160, 84.13160, 'Healthy'),
+(13, 'Suman Ho', 'Arjun (Terminalia arjuna)', '2026-04-05', '/demo/tree_sapling.png', 23.86270, 84.13270, 'Healthy'),
+(14, 'Sanjay Soren', 'Neem (Azadirachta indica)', '2026-04-08', '/demo/tree_growing.png', 23.86380, 84.13380, 'Healthy'),
+(15, 'Asha Tudu', 'Teak (Tectona grandis)', '2026-04-10', '/demo/tree_mature.png', 23.86490, 84.13490, 'Healthy'),
+(16, 'Vijay Oraon', 'Semal (Bombax ceiba)', '2026-04-15', '/demo/tree_sapling.png', 23.86600, 84.13600, 'Dead'),
+(17, 'Puja Devi', 'Jamun (Syzygium cumini)', '2026-04-18', '/demo/tree_growing.png', 23.86710, 84.13710, 'Healthy'),
+(18, 'Santosh Munda', 'Bel (Aegle marmelos)', '2026-04-20', '/demo/tree_mature.png', 23.86820, 84.13820, 'Healthy'),
+(19, 'Sunita Kisku', 'Karanj (Millettia pinnata)', '2026-04-22', '/demo/tree_sapling.png', 23.86930, 84.13930, 'Healthy'),
+(20, 'Amit Hembrom', 'Bamboo (Dendrocalamus strictus)', '2026-04-25', '/demo/tree_growing.png', 23.87040, 84.14040, 'Healthy'),
+(21, 'Kiran Oraon', 'Sal (Shorea robusta)', '2026-05-01', '/demo/tree_mature.png', 23.87150, 84.14150, 'Healthy'),
+(22, 'Sanjay Munda', 'Mahua (Madhuca longifolia)', '2026-05-03', '/demo/tree_growing.png', 23.87260, 84.14260, 'Needs Attention'),
+(23, 'Jyoti Ho', 'Arjun (Terminalia arjuna)', '2026-05-05', '/demo/tree_sapling.png', 23.87370, 84.14370, 'Healthy'),
+(24, 'Rakesh Soren', 'Neem (Azadirachta indica)', '2026-05-08', '/demo/tree_growing.png', 23.87480, 84.14480, 'Healthy'),
+(25, 'Priyanka Tudu', 'Teak (Tectona grandis)', '2026-05-10', '/demo/tree_mature.png', 23.87590, 84.14590, 'Healthy'),
+(26, 'Suresh Oraon', 'Semal (Bombax ceiba)', '2026-05-12', '/demo/tree_sapling.png', 23.87700, 84.14700, 'Healthy'),
+(27, 'Kavita Devi', 'Jamun (Syzygium cumini)', '2026-05-15', '/demo/tree_growing.png', 23.87810, 84.14810, 'Healthy'),
+(28, 'Manoj Munda', 'Bel (Aegle marmelos)', '2026-05-18', '/demo/tree_mature.png', 23.87920, 84.14920, 'Healthy'),
+(29, 'Babita Kisku', 'Karanj (Millettia pinnata)', '2026-05-20', '/demo/tree_sapling.png', 23.88030, 84.15030, 'Healthy'),
+(30, 'Deepak Hembrom', 'Bamboo (Dendrocalamus strictus)', '2026-05-22', '/demo/tree_growing.png', 23.88140, 84.15140, 'Healthy'),
+(31, 'Lalita Oraon', 'Sal (Shorea robusta)', '2026-05-25', '/demo/tree_mature.png', 23.88250, 84.15250, 'Healthy'),
+(32, 'Vikram Munda', 'Mahua (Madhuca longifolia)', '2026-05-28', '/demo/tree_growing.png', 23.88360, 84.15360, 'Healthy'),
+(33, 'Rupa Ho', 'Arjun (Terminalia arjuna)', '2026-06-01', '/demo/tree_sapling.png', 23.88470, 84.15470, 'Healthy'),
+(34, 'Ajay Soren', 'Neem (Azadirachta indica)', '2026-06-03', '/demo/tree_growing.png', 23.88580, 84.15580, 'Healthy'),
+(35, 'Nisha Tudu', 'Teak (Tectona grandis)', '2026-06-05', '/demo/tree_mature.png', 23.88690, 84.15690, 'Healthy'),
+(36, 'Manish Oraon', 'Semal (Bombax ceiba)', '2026-06-08', '/demo/tree_sapling.png', 23.88800, 84.15800, 'Healthy'),
+(37, 'Soni Devi', 'Jamun (Syzygium cumini)', '2026-06-10', '/demo/tree_growing.png', 23.88910, 84.15910, 'Healthy'),
+(38, 'Rajendra Munda', 'Bel (Aegle marmelos)', '2026-06-12', '/demo/tree_mature.png', 23.89020, 84.16020, 'Needs Attention'),
+(39, 'Poonam Kisku', 'Karanj (Millettia pinnata)', '2026-06-15', '/demo/tree_sapling.png', 23.89130, 84.16130, 'Healthy'),
+(40, 'Vinod Hembrom', 'Bamboo (Dendrocalamus strictus)', '2026-06-18', '/demo/tree_growing.png', 23.89240, 84.16240, 'Healthy'),
+(41, 'Aarti Oraon', 'Sal (Shorea robusta)', '2026-06-20', '/demo/tree_mature.png', 23.89350, 84.16350, 'Healthy'),
+(42, 'Dinesh Munda', 'Mahua (Madhuca longifolia)', '2026-06-22', '/demo/tree_growing.png', 23.89460, 84.16460, 'Healthy'),
+(43, 'Reena Ho', 'Arjun (Terminalia arjuna)', '2026-06-23', '/demo/tree_sapling.png', 23.89570, 84.16570, 'Healthy'),
+(44, 'Subhash Soren', 'Neem (Azadirachta indica)', '2026-06-24', '/demo/tree_growing.png', 23.89680, 84.16680, 'Healthy'),
+(45, 'Sapna Tudu', 'Teak (Tectona grandis)', '2026-06-25', '/demo/tree_mature.png', 23.89790, 84.16790, 'Healthy'),
+(46, 'Alok Oraon', 'Semal (Bombax ceiba)', '2026-06-25', '/demo/tree_sapling.png', 23.89900, 84.16900, 'Healthy'),
+(47, 'Kusum Devi', 'Jamun (Syzygium cumini)', '2026-06-25', '/demo/tree_growing.png', 23.90010, 84.17010, 'Healthy'),
+(48, 'Pankaj Munda', 'Bel (Aegle marmelos)', '2026-06-25', '/demo/tree_mature.png', 23.90120, 84.17120, 'Healthy'),
+(49, 'Champa Kisku', 'Karanj (Millettia pinnata)', '2026-06-25', '/demo/tree_sapling.png', 23.90230, 84.17230, 'Healthy'),
+(50, 'Sanjay Hembrom', 'Bamboo (Dendrocalamus strictus)', '2026-06-25', '/demo/tree_growing.png', 23.90340, 84.17340, 'Healthy')
+ON CONFLICT (id) DO NOTHING;
 
+-- 8. Seed Sample Logs for Trees 1 and 2 (so that stats and timeline work instantly)
+INSERT INTO public.tree_logs (tree_id, type, note, staff_name, created_at)
+SELECT 1, 'visit', 'Initial base fertilization complete.', 'Ramesh Kerketta', now() - INTERVAL '2 days'
+WHERE NOT EXISTS (SELECT 1 FROM public.tree_logs WHERE tree_id = 1);
 
--- =====================================================================
--- SEED DATA (50 Trees + Sample Logs)
--- =====================================================================
+INSERT INTO public.tree_logs (tree_id, type, note, staff_name, created_at)
+SELECT 1, 'photo', 'Planting day snapshot.', 'Sunita Tigga', now() - INTERVAL '1 days'
+WHERE NOT EXISTS (SELECT 1 FROM public.tree_logs WHERE tree_id = 1 AND type = 'photo');
 
--- Clean old seed data if present
-TRUNCATE TABLE public.tree_logs CASCADE;
-TRUNCATE TABLE public.trees CASCADE;
+INSERT INTO public.tree_logs (tree_id, type, note, staff_name, created_at)
+SELECT 1, 'visit', 'Watered in the evening, soil moisture verified.', 'Ajay Lakra', now() - INTERVAL '12 hours'
+WHERE NOT EXISTS (SELECT 1 FROM public.tree_logs WHERE tree_id = 1 AND note LIKE '%soil moisture%');
 
--- Insert 50 trees with ID 1 to 50
--- We use realistic Palamau Tiger Reserve species, locations, and planter names.
--- Coordinates are in the Palamau Tiger Reserve range: Lat 23.80 - 23.90, Long 84.10 - 84.30.
-INSERT INTO public.trees (id, planter_name, species, planted_date, main_photo_url, latitude, longitude) VALUES
-(1, 'Kumar Ashish, IFS', 'Sal (Shorea robusta)', '2025-06-15', '/seed/tree_mature.png', 23.854120, 84.123450),
-(2, 'Dr. S. K. Verma', 'Teak (Tectona grandis)', '2025-06-20', '/seed/tree_mature.png', 23.861250, 84.135600),
-(3, 'Ramesh Minz (Forest Guard)', 'Mahua (Madhuca longifolia)', '2025-07-02', '/seed/tree_growing.png', 23.842340, 84.112340),
-(4, 'Sunita Oraon', 'Arjun (Terminalia arjuna)', '2025-07-10', '/seed/tree_sapling.png', 23.871120, 84.148760),
-(5, 'Deepak Kujur', 'Neem (Azadirachta indica)', '2025-07-15', '/seed/tree_growing.png', 23.859000, 84.129900),
-(6, 'Priya Soren', 'Bamboo (Dendrocalamus strictus)', '2025-08-01', '/seed/tree_growing.png', 23.834450, 84.105430),
-(7, 'Anoop Lakra', 'Karanj (Millettia pinnata)', '2025-08-10', '/seed/tree_sapling.png', 23.865430, 84.152310),
-(8, 'Manish Tiwari, IFS', 'Palash (Butea monosperma)', '2025-08-12', '/seed/tree_growing.png', 23.882100, 84.161100),
-(9, 'Sanjay Munda', 'Sissoo (Dalbergia sissoo)', '2025-08-20', '/seed/tree_mature.png', 23.849980, 84.119980),
-(10, 'Asha Devi', 'Amla (Phyllanthus emblica)', '2025-09-01', '/seed/tree_sapling.png', 23.857650, 84.132100),
-(11, 'Rajesh Toppo', 'Sal (Shorea robusta)', '2025-09-05', '/seed/tree_growing.png', 23.863100, 84.144400),
-(12, 'Pradip Yadav', 'Teak (Tectona grandis)', '2025-09-10', '/seed/tree_mature.png', 23.841100, 84.109800),
-(13, 'Sita Kumari', 'Mahua (Madhuca longifolia)', '2025-09-15', '/seed/tree_sapling.png', 23.873200, 84.156500),
-(14, 'Vijay Bhargav', 'Arjun (Terminalia arjuna)', '2025-10-01', '/seed/tree_growing.png', 23.851230, 84.124560),
-(15, 'Kiran Singh', 'Neem (Azadirachta indica)', '2025-10-05', '/seed/tree_mature.png', 23.868700, 84.139800),
-(16, 'Suresh Bhagat', 'Bamboo (Dendrocalamus strictus)', '2025-10-10', '/seed/tree_growing.png', 23.839800, 84.114300),
-(17, 'Anjali Hembrom', 'Karanj (Millettia pinnata)', '2025-10-20', '/seed/tree_sapling.png', 23.876540, 84.162340),
-(18, 'Nitin Tirkey', 'Palash (Butea monosperma)', '2025-11-01', '/seed/tree_growing.png', 23.852400, 84.127800),
-(19, 'Suman Oraon', 'Sissoo (Dalbergia sissoo)', '2025-11-05', '/seed/tree_mature.png', 23.861110, 84.131110),
-(20, 'Vikram Rathore', 'Amla (Phyllanthus emblica)', '2025-11-12', '/seed/tree_sapling.png', 23.844320, 84.116540),
-(21, 'Renu Devi', 'Sal (Shorea robusta)', '2025-11-18', '/seed/tree_growing.png', 23.878900, 84.159900),
-(22, 'Gopal Kisku', 'Teak (Tectona grandis)', '2025-11-25', '/seed/tree_mature.png', 23.850100, 84.121200),
-(23, 'Poonam Linda', 'Mahua (Madhuca longifolia)', '2025-12-01', '/seed/tree_sapling.png', 23.869900, 84.143200),
-(24, 'Ashok Bakhla', 'Arjun (Terminalia arjuna)', '2025-12-05', '/seed/tree_growing.png', 23.841900, 84.108900),
-(25, 'Preeti Tigga', 'Neem (Azadirachta indica)', '2025-12-10', '/seed/tree_mature.png', 23.875400, 84.151200),
-(26, 'Sanjeev Mundu', 'Bamboo (Dendrocalamus strictus)', '2025-12-15', '/seed/tree_growing.png', 23.853200, 84.126500),
-(27, 'Meena Bara', 'Karanj (Millettia pinnata)', '2026-01-02', '/seed/tree_sapling.png', 23.860120, 84.137890),
-(28, 'Umesh Oraon', 'Palash (Butea monosperma)', '2026-01-10', '/seed/tree_growing.png', 23.847650, 84.113210),
-(29, 'Jyoti Xalxo', 'Sissoo (Dalbergia sissoo)', '2026-01-15', '/seed/tree_mature.png', 23.870500, 84.149900),
-(30, 'Arvind Ekka', 'Amla (Phyllanthus emblica)', '2026-01-20', '/seed/tree_sapling.png', 23.855400, 84.128700),
-(31, 'Pinki Kujur', 'Sal (Shorea robusta)', '2026-02-01', '/seed/tree_growing.png', 23.862220, 84.135550),
-(32, 'Devendra Singh', 'Teak (Tectona grandis)', '2026-02-05', '/seed/tree_mature.png', 23.840900, 84.107700),
-(33, 'Mamta Soren', 'Mahua (Madhuca longifolia)', '2026-02-12', '/seed/tree_sapling.png', 23.879990, 84.167770),
-(34, 'Rajiv Beck', 'Arjun (Terminalia arjuna)', '2026-02-18', '/seed/tree_growing.png', 23.851900, 84.123210),
-(35, 'Nisha Devi', 'Neem (Azadirachta indica)', '2026-03-01', '/seed/tree_mature.png', 23.867700, 84.141200),
-(36, 'Harish Minz', 'Bamboo (Dendrocalamus strictus)', '2026-03-05', '/seed/tree_growing.png', 23.843430, 84.118180),
-(37, 'Pushpa Hembrom', 'Karanj (Millettia pinnata)', '2026-03-10', '/seed/tree_sapling.png', 23.872340, 84.153450),
-(38, 'Manoj Tigga', 'Palash (Butea monosperma)', '2026-03-20', '/seed/tree_growing.png', 23.856540, 84.130980),
-(39, 'Kavita Linda', 'Sissoo (Dalbergia sissoo)', '2026-04-02', '/seed/tree_mature.png', 23.864320, 84.136540),
-(40, 'Rakesh Bara', 'Amla (Phyllanthus emblica)', '2026-04-08', '/seed/tree_sapling.png', 23.846540, 84.110120),
-(41, 'Reena Xalxo', 'Sal (Shorea robusta)', '2026-04-15', '/seed/tree_growing.png', 23.871100, 84.148800),
-(42, 'Dilip Kujur', 'Teak (Tectona grandis)', '2026-04-20', '/seed/tree_mature.png', 23.852100, 84.125400),
-(43, 'Savitri Oraon', 'Mahua (Madhuca longifolia)', '2026-05-01', '/seed/tree_sapling.png', 23.866500, 84.142100),
-(44, 'Abhishek Munda', 'Arjun (Terminalia arjuna)', '2026-05-05', '/seed/tree_growing.png', 23.838900, 84.106500),
-(45, 'Rita Devi', 'Neem (Azadirachta indica)', '2026-05-12', '/seed/tree_mature.png', 23.874300, 84.158900),
-(46, 'Sunil Beck', 'Bamboo (Dendrocalamus strictus)', '2026-05-20', '/seed/tree_growing.png', 23.854900, 84.129990),
-(47, 'Anita Toppo', 'Karanj (Millettia pinnata)', '2026-06-01', '/seed/tree_sapling.png', 23.861990, 84.138880),
-(48, 'Sanjay Singh', 'Palash (Butea monosperma)', '2026-06-05', '/seed/tree_growing.png', 23.845450, 84.115450),
-(49, 'Bina Kumari', 'Sissoo (Dalbergia sissoo)', '2026-06-10', '/seed/tree_mature.png', 23.877700, 84.165400),
-(50, 'Ranjit Oraon', 'Amla (Phyllanthus emblica)', '2026-06-15', '/seed/tree_sapling.png', 23.858900, 84.133200);
+INSERT INTO public.tree_logs (tree_id, type, note, staff_name, created_at)
+SELECT 1, 'visit', 'Checked trunk health. Clear.', 'Poonam Minz', now()
+WHERE NOT EXISTS (SELECT 1 FROM public.tree_logs WHERE tree_id = 1 AND note LIKE '%trunk health%');
 
--- Make serial id sequence restart at 51
-SELECT setval('public.trees_id_seq', 50, true);
+INSERT INTO public.tree_logs (tree_id, type, note, staff_name, created_at)
+SELECT 2, 'visit', 'Soil aerated and watered.', 'Sunita Tigga', now() - INTERVAL '3 days'
+WHERE NOT EXISTS (SELECT 1 FROM public.tree_logs WHERE tree_id = 2);
 
--- Add sample logs for Tree 1 (mature Sal) and Tree 3 (growing Mahua) and Tree 4 (sapling Arjun)
-INSERT INTO public.tree_logs (id, tree_id, type, photo_url, note, staff_name, created_at) VALUES
--- Tree 1 logs
-(gen_random_uuid(), 1, 'visit', NULL, 'Initial inspection of the mature Sal tree. Tree is in excellent condition.', 'Officer Ramesh', '2025-06-16 10:00:00+00'),
-(gen_random_uuid(), 1, 'visit', NULL, 'Standard watering and soil fertilization around the base.', 'Officer Ramesh', '2025-07-20 09:30:00+00'),
-(gen_random_uuid(), 1, 'photo', '/seed/tree_tended.png', 'Tended the base, checked leaf canopy for pests. Healthy.', 'Guard Suresh', '2025-10-05 14:15:00+00'),
-(gen_random_uuid(), 1, 'visit', NULL, 'Monthly checkup. Soil aerated.', 'Guard Suresh', '2026-03-12 11:00:00+00'),
+INSERT INTO public.tree_logs (tree_id, type, note, staff_name, created_at)
+SELECT 2, 'photo', 'Initial health checkup photo.', 'Ajay Lakra', now() - INTERVAL '2 days'
+WHERE NOT EXISTS (SELECT 1 FROM public.tree_logs WHERE tree_id = 2 AND type = 'photo');
 
--- Tree 3 logs
-(gen_random_uuid(), 3, 'visit', NULL, 'Checked sapling growth. Soil is rich.', 'Officer Ramesh', '2025-07-05 08:00:00+00'),
-(gen_random_uuid(), 3, 'photo', '/seed/tree_growing.png', 'Photographed growth progression. Significant height increase.', 'Guard Suresh', '2025-11-20 15:45:00+00'),
-(gen_random_uuid(), 3, 'visit', NULL, 'Watered and cleared weeds around the trunk.', 'Guard Suresh', '2026-02-15 10:30:00+00'),
-
--- Tree 4 logs
-(gen_random_uuid(), 4, 'visit', NULL, 'Initial watering after planting.', 'Officer Ramesh', '2025-07-11 07:30:00+00'),
-(gen_random_uuid(), 4, 'photo', '/seed/tree_sapling.png', 'Photo of newly planted sapling.', 'Guard Suresh', '2025-07-12 16:00:00+00'),
-(gen_random_uuid(), 4, 'visit', NULL, 'Watered and checked soil moisture levels.', 'Officer Ramesh', '2025-08-15 08:30:00+00');
+INSERT INTO public.tree_logs (tree_id, type, note, staff_name, created_at)
+SELECT 2, 'visit', 'Evening checking. Watering complete.', 'Deepak Toppo', now() - INTERVAL '1 days'
+WHERE NOT EXISTS (SELECT 1 FROM public.tree_logs WHERE tree_id = 2 AND note LIKE '%Evening checking%');

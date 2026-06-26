@@ -3,9 +3,9 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { QRCodeSVG } from 'qrcode.react';
-import { getTrees, getSession, signIn } from '@/lib/mockData';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
+import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabase';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -14,9 +14,12 @@ import {
   Printer, 
   Loader2, 
   LogIn, 
-  ShieldAlert,
-  Info
+  AlertCircle,
+  Info,
+  QrCode,
+  ShieldAlert
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import { cn } from '@/lib/utils';
 
 const DEMO_EMAIL = "demo@ptr.org";
@@ -24,10 +27,16 @@ const DEMO_PASSWORD = "demo1234";
 
 interface Tree {
   id: number;
+  planter_name: string;
   species: string;
+  planted_date: string;
+  main_photo_url: string;
+  latitude: number;
+  longitude: number;
 }
 
 export default function QrCodesPage() {
+  const router = useRouter();
   const [user, setUser] = useState<any>(null);
   const [trees, setTrees] = useState<Tree[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,48 +47,83 @@ export default function QrCodesPage() {
   const [loginEmail, setLoginEmail] = useState(DEMO_EMAIL);
   const [loginPassword, setLoginPassword] = useState(DEMO_PASSWORD);
 
-  // Determine site URL for QRs
-  const siteUrl = 
-    process.env.NEXT_PUBLIC_SITE_URL || 
-    (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
+  // Fetch trees list from Supabase
+  const fetchTrees = async () => {
+    try {
+      const { data, error: err } = await supabase
+        .from('trees')
+        .select('*')
+        .order('id', { ascending: true });
+
+      if (err) throw err;
+      setTrees(data || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch trees for QR sheet.');
+    }
+  };
 
   useEffect(() => {
-    // Read session and trees DDL
-    setUser(getSession());
-    setTrees(getTrees());
-    setLoading(false);
+    // Check initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchTrees();
+      }
+      setLoading(false);
+    });
 
-    const handleAuthChange = () => {
-      setUser(getSession());
-      setTrees(getTrees());
-    };
-    window.addEventListener('ptr_auth_change', handleAuthChange);
-    return () => window.removeEventListener('ptr_auth_change', handleAuthChange);
+    // Listen reactively to auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchTrees();
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setActionLoading('login');
     setError(null);
 
-    setTimeout(() => {
-      signIn();
-      setUser({ email: DEMO_EMAIL, name: 'Demo Staff' });
-      setTrees(getTrees());
-      window.dispatchEvent(new Event('ptr_auth_change'));
-      setActionLoading(null);
-    }, 500);
+    const { data, error: loginErr } = await supabase.auth.signInWithPassword({
+      email: loginEmail,
+      password: loginPassword,
+    });
+
+    if (loginErr) {
+      setError(loginErr.message || 'Invalid credentials.');
+    } else {
+      setUser(data.user);
+      fetchTrees();
+    }
+    setActionLoading(null);
   };
 
   const handlePrint = () => {
     window.print();
   };
 
+  // Determine site base URL (from env or window origin fallback)
+  const getSiteUrl = () => {
+    if (process.env.NEXT_PUBLIC_SITE_URL) {
+      return process.env.NEXT_PUBLIC_SITE_URL;
+    }
+    if (typeof window !== 'undefined') {
+      return window.location.origin;
+    }
+    return 'http://localhost:3000';
+  };
+
+  const siteUrl = getSiteUrl();
+
   if (loading) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center p-8 bg-background">
+      <div className="flex-1 flex flex-col items-center justify-center p-8 bg-background min-h-screen">
         <Loader2 className="h-8 w-8 animate-spin text-primary mb-2" />
-        <p className="text-sm text-muted-foreground">Checking authorization & loading tags...</p>
+        <p className="text-sm text-muted-foreground">Checking authentication status...</p>
       </div>
     );
   }
@@ -87,7 +131,7 @@ export default function QrCodesPage() {
   // RENDER DEMO LOGIN IF NOT SIGNED IN
   if (!user) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-background px-4 py-16">
+      <div className="flex-1 flex items-center justify-center bg-background px-4 py-16 min-h-screen">
         <Card className="w-full max-w-sm border-border shadow-lg bg-card">
           <CardHeader className="text-center space-y-2 pb-4">
             <div className="relative h-20 w-20 overflow-hidden rounded-full border border-primary/20 bg-white mx-auto shadow-sm">
@@ -181,7 +225,9 @@ export default function QrCodesPage() {
       {/* Control bar - hidden during print */}
       <div className="container mx-auto max-w-5xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-border pb-6 mb-8 print:hidden">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">Print QR Codes</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground flex items-center gap-2">
+            <QrCode className="h-6 w-6 text-primary" /> Print QR Codes
+          </h1>
           <p className="text-sm text-muted-foreground">
             Printable sheet for all {trees.length} seeded trees. Sized for sticker or metal tag printing.
           </p>
@@ -199,14 +245,14 @@ export default function QrCodesPage() {
           </Link>
           <Button onClick={handlePrint} className="bg-primary hover:bg-primary/95 text-white gap-2 h-11 px-5 shadow-md">
             <Printer className="h-4 w-4" />
-            Download / Print All Tags
+            Print Tags
           </Button>
         </div>
       </div>
 
       {/* Grid of tags */}
       <div className="container mx-auto max-w-5xl">
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 justify-items-center">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 justify-items-center print:grid-cols-2 print:gap-4 print:p-0">
           {trees.map((tree) => {
             const treeUrl = `${siteUrl}/tree/${tree.id}`;
 
@@ -248,54 +294,25 @@ export default function QrCodesPage() {
                   </span>
                 </div>
 
-                {/* Tag Footer */}
-                <div className="w-full text-center border-t border-gray-200 pt-1.5">
-                  <div className="text-xs font-bold text-green-900 bg-green-50 rounded px-1.5 py-0.5 inline-block mb-1 border border-green-150">
-                    Tree #{tree.id}
+                {/* Tag Footer Details */}
+                <div className="w-full border-t border-gray-200 pt-1.5 flex flex-col leading-tight">
+                  <div className="flex justify-between items-baseline mb-0.5">
+                    <span className="text-[10px] font-bold text-gray-950 truncate max-w-[120px]">
+                      {tree.species.split(' (')[0]}
+                    </span>
+                    <span className="text-[12px] font-black text-green-800 shrink-0 font-mono">
+                      #{tree.id}
+                    </span>
                   </div>
-                  <div className="text-[9px] font-semibold text-gray-800 line-clamp-1 truncate px-1">
-                    {tree.species}
-                  </div>
+                  <span className="text-[7px] text-gray-500 font-bold uppercase tracking-wider">
+                    Location: Kasturba School, PTR
+                  </span>
                 </div>
               </div>
             );
           })}
         </div>
       </div>
-
-      {/* Print-only CSS helpers */}
-      <style jsx global>{`
-        @media print {
-          body {
-            background: white !important;
-            color: black !important;
-            padding: 0 !important;
-          }
-          main {
-            margin: 0 !important;
-            padding: 0 !important;
-          }
-          .min-h-screen {
-            min-height: auto !important;
-            padding: 0 !important;
-          }
-          .grid {
-            display: grid !important;
-            grid-template-columns: repeat(3, 1fr) !important;
-            gap: 15px !important;
-            justify-items: center !important;
-            width: 100% !important;
-          }
-          .w-\\[2\\.5in\\] {
-            width: 2.3in !important;
-            height: 3.2in !important;
-            border: 1px solid #000 !important;
-            margin-bottom: 10px !important;
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-          }
-        }
-      `}</style>
     </div>
   );
 }

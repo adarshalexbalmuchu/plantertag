@@ -17,6 +17,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Palamu Tiger Reserve - QR Tree Tracker",
   description: "Official QR-based tree tracking application for Palamu Tiger Reserve (PTR), Government of Jharkhand.",
+  manifest: "/manifest.json",
 };
 
 export default function RootLayout({
@@ -35,6 +36,24 @@ export default function RootLayout({
           {children}
         </main>
         <Footer />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              if ('serviceWorker' in navigator) {
+                window.addEventListener('load', function() {
+                  navigator.serviceWorker.register('/sw.js').then(
+                    function(reg) {
+                      console.log('[PWA] ServiceWorker registered scope:', reg.scope);
+                    },
+                    function(err) {
+                      console.warn('[PWA] ServiceWorker registration failed:', err);
+                    }
+                  );
+                });
+              }
+            `
+          }}
+        />
       </body>
     </html>
   );

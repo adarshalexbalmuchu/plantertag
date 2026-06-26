@@ -14,7 +14,6 @@ import {
   ArrowRight,
   Info
 } from 'lucide-react';
-import { getTrees } from '@/lib/mockData';
 
 export default function HomePage() {
   const router = useRouter();
@@ -26,7 +25,7 @@ export default function HomePage() {
     setSearchError('');
 
     const id = parseInt(treeId, 10);
-    const maxTrees = getTrees().length;
+    const maxTrees = 50;
     if (isNaN(id) || id < 1 || id > maxTrees) {
       setSearchError(`Please enter a valid tree ID between 1 and ${maxTrees}.`);
       return;

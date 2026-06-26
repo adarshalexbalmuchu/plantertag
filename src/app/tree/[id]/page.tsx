@@ -1,10 +1,7 @@
-'use client';
-
-import { use, useEffect, useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { notFound } from 'next/navigation';
-import { getTrees, getLogs } from '@/lib/mockData';
+import { supabase } from '@/lib/supabase';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { buttonVariants } from '@/components/ui/button';
@@ -13,70 +10,96 @@ import {
   MapPin, 
   User, 
   Droplet, 
-  Camera, 
   Clock, 
   ChevronRight, 
-  ExternalLink
+  ExternalLink,
+  ShieldCheck
 } from 'lucide-react';
-import { format } from 'date-fns';
+import { format, differenceInDays } from 'date-fns';
 import { cn } from '@/lib/utils';
 
 interface PageProps {
   params: Promise<{ id: string }>;
 }
 
-export default function TreePage({ params }: PageProps) {
-  const resolvedParams = use(params);
-  const treeId = parseInt(resolvedParams.id, 10);
+export const revalidate = 0; // Disable caching so it always loads live data on scan
 
-  const [tree, setTree] = useState<any>(null);
-  const [logs, setLogs] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+export default async function TreePage({ params }: PageProps) {
+  const { id } = await params;
+  const treeId = parseInt(id, 10);
 
-  useEffect(() => {
-    if (isNaN(treeId)) {
-      setLoading(false);
-      return;
-    }
+  if (isNaN(treeId)) {
+    return notFound();
+  }
 
-    const allTrees = getTrees();
-    const targetTree = allTrees.find(t => t.id === treeId);
-    
-    if (targetTree) {
-      setTree(targetTree);
-      // Get logs for this tree sorted by newest first
-      const allLogs = getLogs();
-      const treeLogs = allLogs
-        .filter(l => l.tree_id === treeId)
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-      setLogs(treeLogs);
-    }
-    
-    setLoading(false);
-  }, [treeId]);
+  // Fetch tree details from live Supabase
+  const { data: tree, error: treeError } = await supabase
+    .from('trees')
+    .select('*')
+    .eq('id', treeId)
+    .single();
 
-  if (loading) {
+  if (treeError || !tree) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center p-8 bg-background">
-        <Loader2 className="h-8 w-8 animate-spin text-primary mb-2" />
-        <p className="text-sm text-muted-foreground">Loading tree logs...</p>
+      <div className="min-h-screen bg-background flex flex-col justify-center items-center px-4 text-center">
+        <Card className="w-full max-w-sm border-border p-6 shadow-md bg-card">
+          <div className="h-16 w-16 bg-destructive/10 text-destructive rounded-full flex items-center justify-center mx-auto mb-4">
+            <MapPin className="h-8 w-8" />
+          </div>
+          <h2 className="text-xl font-bold text-foreground">Tree Not Found</h2>
+          <p className="text-sm text-muted-foreground mt-2">
+            The scanned QR tag ID #{id} does not exist in the official Palamu Tiger Reserve registry.
+          </p>
+          <div className="mt-6">
+            <Link href="/" className={cn(buttonVariants({ variant: 'default' }), "w-full bg-primary text-white hover:bg-primary/95")}>
+              Go to Homepage
+            </Link>
+          </div>
+        </Card>
       </div>
     );
   }
 
-  if (!tree) {
-    return notFound();
-  }
+  // Fetch logs for this tree from live Supabase (newest first)
+  const { data: rawLogs, error: logsError } = await supabase
+    .from('tree_logs')
+    .select('*')
+    .eq('tree_id', treeId)
+    .order('created_at', { ascending: false });
 
-  const visitLogs = logs.filter(log => log.type === 'visit');
+  const logs = rawLogs || [];
+
+  const visitLogs = logs?.filter(log => log.type === 'visit') || [];
   const visitCount = visitLogs.length;
 
+  // Missed-watering Calculation
+  const OVERDUE_DAYS = 7;
+  const latestLog = logs && logs.length > 0 ? logs[0] : null;
+  let daysSinceLastTended = 0;
+  
+  if (latestLog) {
+    daysSinceLastTended = differenceInDays(new Date(), new Date(latestLog.created_at));
+  } else {
+    // If no logs, compare with planted_date
+    daysSinceLastTended = differenceInDays(new Date(), new Date(tree.planted_date));
+  }
+  const isOverdue = daysSinceLastTended >= OVERDUE_DAYS;
+
+  // Status Badge Colors
+  const statusConfig = {
+    'Healthy': { bg: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20', label: 'Healthy' },
+    'Needs Attention': { bg: 'bg-amber-500/10 text-amber-600 border-amber-500/20', label: 'Needs Attention' },
+    'Dead': { bg: 'bg-rose-500/10 text-rose-600 border-rose-500/20', label: 'Dead' }
+  };
+  const currentStatus = (tree.status as keyof typeof statusConfig) || 'Healthy';
+  const statusStyle = statusConfig[currentStatus];
+
   return (
-    <div className="min-h-screen bg-background pb-24">
-      {/* Hero Banner / Cover Photo - Shows the TREE photo, not the logo! */}
+    <div className="min-h-screen bg-background pb-28">
+      {/* Cover / Hero Photo */}
       <div className="relative h-64 w-full bg-secondary sm:h-96 md:h-[400px]">
         <Image
-          src={tree.main_photo_url}
+          src={tree.main_photo_url || "/demo/tree_mature.png"}
           alt={tree.species}
           fill
           className="object-cover"
@@ -84,9 +107,14 @@ export default function TreePage({ params }: PageProps) {
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-transparent" />
         <div className="absolute bottom-4 left-4 right-4 text-white">
-          <Badge className="mb-2 bg-primary text-white hover:bg-primary/95 text-xs font-semibold px-2.5 py-0.5 border-none">
-            Tree #{tree.id}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <Badge className="bg-primary text-white hover:bg-primary/95 text-xs font-semibold px-2.5 py-0.5 border-none">
+              Tree #{tree.id}
+            </Badge>
+            <Badge variant="outline" className={cn("text-xs font-semibold px-2.5 py-0.5 border uppercase", statusStyle.bg)}>
+              {statusStyle.label}
+            </Badge>
+          </div>
           <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{tree.species}</h1>
           <p className="text-sm opacity-90 flex items-center gap-1 mt-1 font-medium">
             <User className="h-3.5 w-3.5" /> Planter: {tree.planter_name}
@@ -95,6 +123,16 @@ export default function TreePage({ params }: PageProps) {
       </div>
 
       <div className="container mx-auto max-w-lg px-4 mt-6">
+        
+        {/* Overdue Warning Notification (Subtle text for public-facing page) */}
+        {isOverdue && (
+          <div className="mb-4 bg-amber-500/5 border border-amber-500/10 rounded-xl p-3.5 text-center">
+            <p className="text-xs text-amber-700 font-medium">
+              ⚠️ Last tended {daysSinceLastTended} days ago
+            </p>
+          </div>
+        )}
+
         {/* Quick Stats Grid */}
         <div className="grid grid-cols-2 gap-4 mb-6">
           <Card className="shadow-sm border-border bg-card">
@@ -152,7 +190,7 @@ export default function TreePage({ params }: PageProps) {
             </div>
             <div className="flex justify-between items-center py-1.5 border-b border-border/50">
               <span className="text-muted-foreground">Location</span>
-              <span className="font-semibold text-foreground">{tree.location}</span>
+              <span className="font-semibold text-foreground">Kasturba School, PTR</span>
             </div>
 
             {/* GPS Coordinates */}
@@ -253,9 +291,18 @@ export default function TreePage({ params }: PageProps) {
                       </p>
                     )}
 
-                    <p className="text-[10px] text-muted-foreground flex items-center gap-1 font-semibold">
-                      <User className="h-3 w-3" /> Logged by {log.staff_name}
-                    </p>
+                    <div className="flex flex-wrap justify-between items-center gap-2 mt-2 pt-2 border-t border-border/40">
+                      <p className="text-[10px] text-muted-foreground flex items-center gap-1 font-semibold">
+                        <User className="h-3 w-3" /> Logged by {log.staff_name.split('@')[0]}
+                      </p>
+
+                      {/* GPS Verified Badge */}
+                      {log.log_latitude && log.log_longitude && (
+                        <span className="inline-flex items-center gap-0.5 text-[9px] text-emerald-600 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-full font-bold uppercase">
+                          <ShieldCheck className="h-3 w-3 text-emerald-600" /> Location Verified
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -273,30 +320,10 @@ export default function TreePage({ params }: PageProps) {
             "w-full max-w-md h-12 text-sm font-semibold rounded-xl shadow-md gap-2 bg-primary text-white hover:bg-primary/95 flex justify-center items-center"
           )}
         >
-          <Camera className="h-4 w-4" />
           Staff Update
           <ChevronRight className="h-4 w-4 ml-auto" />
         </Link>
       </div>
     </div>
-  );
-}
-
-function Loader2(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="24"
-      height="24"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      {...props}
-    >
-      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-    </svg>
   );
 }

@@ -4,7 +4,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { getSession, signOut } from '@/lib/mockData';
+import { supabase } from '@/lib/supabase';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { LogOut, LayoutDashboard, User } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -14,20 +14,23 @@ export default function Navbar() {
   const [user, setUser] = useState<any>(null);
 
   useEffect(() => {
-    // Set initial session
-    setUser(getSession());
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
 
-    // Listen for mock auth changes reactively
-    const handleAuthChange = () => {
-      setUser(getSession());
+    // Listen reactively to auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => {
+      subscription.unsubscribe();
     };
-    window.addEventListener('ptr_auth_change', handleAuthChange);
-    return () => window.removeEventListener('ptr_auth_change', handleAuthChange);
   }, []);
 
-  const handleLogout = () => {
-    signOut();
-    window.dispatchEvent(new Event('ptr_auth_change'));
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
     router.push('/login');
     router.refresh();
   };
