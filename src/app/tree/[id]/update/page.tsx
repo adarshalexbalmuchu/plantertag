@@ -91,17 +91,19 @@ export default function UpdateTreePage({ params }: PageProps) {
     };
 
     if (isMockMode) {
-      const session = getMockSession();
-      setUser(session);
-      if (session) {
-        fetchTree();
-      }
-      setLoading(false);
+      (async () => {
+        const session = getMockSession();
+        setUser(session);
+        if (session) {
+          await fetchTree();
+        }
+        setLoading(false);
+      })();
     } else {
-      supabase.auth.getSession().then(({ data: { session } }) => {
+      supabase.auth.getSession().then(async ({ data: { session } }) => {
         setUser(session?.user ?? null);
         if (session?.user) {
-          fetchTree();
+          await fetchTree();
         }
         setLoading(false);
       });
