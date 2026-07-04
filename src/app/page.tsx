@@ -147,7 +147,7 @@ export default function HomePage() {
             {/* Matching Trees List */}
             {matchingTrees.length > 0 && (
               <div className="mt-4 text-left border border-border bg-card rounded-xl p-4 space-y-2 max-h-60 overflow-y-auto">
-                <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider mb-2">
+                <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider mb-2">
                   Matching Planters ({matchingTrees.length})
                 </p>
                 <div className="space-y-2">
@@ -161,7 +161,7 @@ export default function HomePage() {
                         <p className="text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
                           {t.planter_name}
                         </p>
-                        <p className="text-[10px] text-muted-foreground">
+                        <p className="text-[11px] text-muted-foreground">
                           {t.species.split(' (')[0]} • Planted {new Date(t.planted_date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
                         </p>
                       </div>
@@ -176,51 +176,31 @@ export default function HomePage() {
           </CardContent>
         </Card>
 
+        {/* Informational Blurb */}
+        <div className="max-w-md mx-auto flex gap-3 text-left text-sm leading-relaxed text-muted-foreground">
+          <Info className="h-5 w-5 text-primary shrink-0 mt-0.5" />
+          <p>
+            Every tree in the reserve carries a QR tag. Scan it, or search above, to see its planting history, health status, and growth timeline.
+          </p>
+        </div>
+
         {/* Staff/Admin CTA Link */}
-        <div className="pt-4 flex flex-col sm:flex-row justify-center items-center gap-4 text-sm text-muted-foreground">
-          <Link 
-            href="/login" 
-            className="flex items-center gap-1 font-semibold text-primary hover:underline"
+        <div className="pt-2 flex flex-col sm:flex-row justify-center items-center gap-3 sm:gap-5 text-sm">
+          <Link
+            href="/login"
+            className="flex items-center gap-1 font-semibold text-primary hover:underline underline-offset-4"
           >
             Forest Guard / Staff Login
             <ArrowRight className="h-4 w-4" />
           </Link>
-          <span className="hidden sm:inline opacity-40">|</span>
-          <Link 
-            href="/admin" 
-            className="flex items-center gap-1 font-semibold text-primary hover:underline"
+          <span className="hidden sm:inline text-border">|</span>
+          <Link
+            href="/admin"
+            className="flex items-center gap-1 font-semibold text-primary hover:underline underline-offset-4"
           >
-            Go to Admin Dashboard
+            Admin Dashboard
             <ArrowRight className="h-4 w-4" />
           </Link>
-        </div>
-
-        {/* Informational Blurb */}
-        <div className="max-w-md mx-auto bg-primary/5 border border-primary/10 p-4 rounded-xl flex gap-3 text-left text-xs leading-relaxed text-muted-foreground mt-8">
-          <Info className="h-5 w-5 text-primary shrink-0 mt-0.5" />
-          <div>
-            <p className="font-semibold text-primary mb-0.5">Forest Monitoring Initiative</p>
-            <p>
-              Each tree in the reserve is marked with a secure QR tag. Scanning it instantly shows the tree's planting history, health status, and growth timeline.
-            </p>
-          </div>
-        </div>
-
-        {/* How to Use Section */}
-        <div className="max-w-md mx-auto mt-4 border border-border bg-card rounded-xl p-4 text-left shadow-sm">
-          <h3 className="text-xs font-bold text-foreground flex items-center gap-1.5 mb-2">
-            <Info className="h-4 w-4 text-primary" /> How to Use the Portal
-          </h3>
-          <div className="space-y-2 text-[11px] text-muted-foreground leading-relaxed">
-            <div>
-              <p className="font-semibold text-foreground">For Public Visitors:</p>
-              <p>Scan any tree's QR tag, or enter its Tree ID or planter's name above, to see its growth history.</p>
-            </div>
-            <div className="border-t border-border/50 pt-2 mt-1">
-              <p className="font-semibold text-foreground">For Forest Staff:</p>
-              <p>Log in via Staff Login, then scan a tree's tag and tap 'Staff Update' to log a watering visit, edit details, or upload a growth photo.</p>
-            </div>
-          </div>
         </div>
       </div>
     </div>

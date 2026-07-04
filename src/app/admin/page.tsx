@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { supabase, isMockMode } from '@/lib/supabase';
+import { supabase, isMockMode, getCurrentProfile } from '@/lib/supabase';
 import { getMockTrees, getMockLogs, getMockSession, signInMock, signOutMock } from '@/lib/mockData';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -55,30 +55,23 @@ interface Tree {
   latitude: number;
   longitude: number;
   status: string;
-}
-
-interface TreeLog {
-  id: string;
-  tree_id: number;
-  type: 'photo' | 'visit';
-  photo_url?: string;
-  note?: string;
-  staff_name: string;
-  created_at: string;
+  total_visits?: number;
+  total_photos?: number;
+  last_activity_at?: string | null;
 }
 
 export default function AdminPage() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [trees, setTrees] = useState<Tree[]>([]);
-  const [logs, setLogs] = useState<TreeLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Login form pre-filled
-  const [loginEmail, setLoginEmail] = useState(DEMO_EMAIL);
-  const [loginPassword, setLoginPassword] = useState(DEMO_PASSWORD);
+  // Login form pre-filled (mock mode only — real deployments shouldn't advertise credentials)
+  const [loginEmail, setLoginEmail] = useState(isMockMode ? DEMO_EMAIL : '');
+  const [loginPassword, setLoginPassword] = useState(isMockMode ? DEMO_PASSWORD : '');
 
   // Table filtering and sorting states
   const [search, setSearch] = useState('');
@@ -87,28 +80,34 @@ export default function AdminPage() {
   const [sortField, setSortField] = useState<'id' | 'species' | 'planter_name' | 'planted_date' | 'total_visits' | 'days_overdue'>('id');
   const [sortAsc, setSortAsc] = useState(true);
 
-  // Fetch all data
+  // Fetch all data. In real mode this reads from tree_dashboard_view, a SQL
+  // view that pre-aggregates visit/photo counts per tree — the admin
+  // dashboard no longer has to download the entire (unboundedly-growing)
+  // tree_logs table just to compute counters.
   const fetchData = async () => {
     try {
       if (isMockMode) {
-        setTrees(getMockTrees());
-        setLogs(getMockLogs());
+        const mockTrees = getMockTrees();
+        const mockLogs = getMockLogs();
+        const enriched = mockTrees.map((tree) => {
+          const treeLogs = mockLogs.filter((l) => l.tree_id === tree.id);
+          const latest = treeLogs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+          return {
+            ...tree,
+            total_visits: treeLogs.filter((l) => l.type === 'visit').length,
+            total_photos: treeLogs.filter((l) => l.type === 'photo').length,
+            last_activity_at: latest ? latest.created_at : null,
+          };
+        });
+        setTrees(enriched);
       } else {
-        const { data: treesData, error: treesErr } = await supabase
-          .from('trees')
+        const { data, error: viewErr } = await supabase
+          .from('tree_dashboard_view')
           .select('*')
           .order('id', { ascending: true });
 
-        if (treesErr) throw treesErr;
-
-        const { data: logsData, error: logsErr } = await supabase
-          .from('tree_logs')
-          .select('*');
-
-        if (logsErr) throw logsErr;
-
-        setTrees(treesData || []);
-        setLogs(logsData || []);
+        if (viewErr) throw viewErr;
+        setTrees(data || []);
       }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch registry data.');
@@ -119,16 +118,19 @@ export default function AdminPage() {
     if (isMockMode) {
       const session = getMockSession();
       setUser(session);
+      setIsAdmin(session?.role === 'admin');
       if (session) {
         fetchData();
       }
       setLoading(false);
     } else {
       // Check session
-      supabase.auth.getSession().then(({ data: { session } }) => {
+      supabase.auth.getSession().then(async ({ data: { session } }) => {
         setUser(session?.user ?? null);
         if (session?.user) {
-          fetchData();
+          const profile = await getCurrentProfile();
+          setIsAdmin(profile?.role === 'admin');
+          if (profile?.role === 'admin') fetchData();
         }
         setLoading(false);
       });
@@ -137,7 +139,12 @@ export default function AdminPage() {
       const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
         setUser(session?.user ?? null);
         if (session?.user) {
-          fetchData();
+          getCurrentProfile().then((profile) => {
+            setIsAdmin(profile?.role === 'admin');
+            if (profile?.role === 'admin') fetchData();
+          });
+        } else {
+          setIsAdmin(false);
         }
       });
 
@@ -154,6 +161,7 @@ export default function AdminPage() {
       if (loginEmail === DEMO_EMAIL && loginPassword === DEMO_PASSWORD) {
         signInMock();
         setUser({ email: DEMO_EMAIL, name: 'Demo Staff' });
+        setIsAdmin(true);
         fetchData();
       } else {
         setError('Invalid credentials.');
@@ -169,7 +177,9 @@ export default function AdminPage() {
         setError(loginErr.message || 'Invalid credentials.');
       } else {
         setUser(data.user);
-        fetchData();
+        const profile = await getCurrentProfile();
+        setIsAdmin(profile?.role === 'admin');
+        if (profile?.role === 'admin') fetchData();
       }
       setActionLoading(null);
     }
@@ -183,48 +193,44 @@ export default function AdminPage() {
       await supabase.auth.signOut();
       setUser(null);
     }
+    setIsAdmin(false);
     router.push('/login');
   };
 
-  // Enriched tree rows with computed days overdue & visit counts
+  // Enriched tree rows with computed days overdue (counts already aggregated
+  // server-side by tree_dashboard_view, or client-side in mock mode above)
   const enrichedTrees = useMemo(() => {
     return trees.map((tree) => {
-      const treeLogs = logs.filter((l) => l.tree_id === tree.id);
-      const visits = treeLogs.filter((l) => l.type === 'visit');
-      
-      // Get latest log
-      const latestLog = treeLogs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
-      
-      let daysSinceLastTended = 0;
-      if (latestLog) {
-        daysSinceLastTended = differenceInDays(new Date(), new Date(latestLog.created_at));
-      } else {
-        daysSinceLastTended = differenceInDays(new Date(), new Date(tree.planted_date));
-      }
+      const lastActivity = tree.last_activity_at || null;
+
+      const daysSinceLastTended = lastActivity
+        ? differenceInDays(new Date(), new Date(lastActivity))
+        : differenceInDays(new Date(), new Date(tree.planted_date));
 
       return {
         ...tree,
-        total_visits: visits.length,
+        total_visits: tree.total_visits ?? 0,
+        total_photos: tree.total_photos ?? 0,
         days_overdue: daysSinceLastTended,
         is_overdue: daysSinceLastTended >= OVERDUE_DAYS,
-        last_activity: latestLog ? latestLog.created_at : null,
+        last_activity: lastActivity,
       };
     });
-  }, [trees, logs]);
+  }, [trees]);
 
   // Aggregate statistics for dashboard counters
   const stats = useMemo(() => {
     const totalTrees = enrichedTrees.length;
-    const totalVisits = logs.filter(l => l.type === 'visit').length;
-    const totalPhotos = logs.filter(l => l.type === 'photo').length;
-    
+    const totalVisits = enrichedTrees.reduce((sum, t) => sum + t.total_visits, 0);
+    const totalPhotos = enrichedTrees.reduce((sum, t) => sum + t.total_photos, 0);
+
     const healthy = enrichedTrees.filter(t => t.status === 'Healthy').length;
     const needsAttention = enrichedTrees.filter(t => t.status === 'Needs Attention').length;
     const dead = enrichedTrees.filter(t => t.status === 'Dead').length;
     const overdue = enrichedTrees.filter(t => t.is_overdue).length;
 
     return { totalTrees, totalVisits, totalPhotos, healthy, needsAttention, dead, overdue };
-  }, [enrichedTrees, logs]);
+  }, [enrichedTrees]);
 
   // Sorting and Filtering logic
   const filteredTrees = useMemo(() => {
@@ -311,13 +317,15 @@ export default function AdminPage() {
                 </div>
               )}
 
-              <div className="bg-primary/5 border border-primary/10 text-muted-foreground text-xs p-3 rounded-lg flex gap-2 items-start">
-                <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
-                <p>
-                  Use pre-authorized credentials:<br />
-                  <code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_EMAIL}</code> / <code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_PASSWORD}</code>
-                </p>
-              </div>
+              {isMockMode && (
+                <div className="bg-primary/5 border border-primary/10 text-muted-foreground text-xs p-3 rounded-lg flex gap-2 items-start">
+                  <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
+                  <p>
+                    Use pre-authorized demo credentials:<br />
+                    <code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_EMAIL}</code> / <code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_PASSWORD}</code>
+                  </p>
+                </div>
+              )}
 
               <div className="space-y-1.5">
                 <Label htmlFor="email">Email Address</Label>
@@ -372,10 +380,36 @@ export default function AdminPage() {
     );
   }
 
+  // RENDER ACCESS DENIED FOR NON-ADMIN STAFF
+  if (!isAdmin) {
+    return (
+      <div className="min-h-screen bg-background flex flex-col justify-center items-center px-4 text-center">
+        <Card className="w-full max-w-sm border-border p-6 shadow-md bg-card">
+          <div className="h-16 w-16 bg-destructive/10 text-destructive rounded-full flex items-center justify-center mx-auto mb-4">
+            <AlertCircle className="h-8 w-8" />
+          </div>
+          <h2 className="text-xl font-bold text-foreground">Admin Access Required</h2>
+          <p className="text-sm text-muted-foreground mt-2">
+            Your account ({user.email}) is signed in as staff, not admin. Ask an admin to promote your account if you need dashboard access.
+          </p>
+          <div className="mt-6">
+            <Button
+              variant="outline"
+              onClick={handleLogout}
+              className="w-full border-border hover:bg-destructive/10 hover:text-destructive gap-1.5"
+            >
+              <LogOut className="h-4 w-4" /> Logout
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="flex-1 bg-background px-4 py-8 md:py-12">
       <div className="container mx-auto max-w-5xl space-y-8">
-        
+
         {/* Header Block */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-border pb-6">
           <div className="space-y-1">
@@ -414,7 +448,7 @@ export default function AdminPage() {
               </div>
               <div className="flex flex-col min-w-0">
                 <span className="text-xl font-black text-primary leading-none">{stats.totalTrees}</span>
-                <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider mt-1 truncate">
+                <span className="text-[11px] text-muted-foreground uppercase font-bold tracking-wider mt-1 truncate">
                   Total Trees
                 </span>
               </div>
@@ -423,12 +457,12 @@ export default function AdminPage() {
 
           <Card className="shadow-sm border-border bg-card">
             <CardContent className="p-4 flex items-center gap-3.5">
-              <div className="p-3 bg-blue-500/10 text-blue-600 rounded-xl shrink-0">
+              <div className="p-3 bg-primary/10 text-primary rounded-xl shrink-0">
                 <Droplet className="h-5 w-5 fill-current" />
               </div>
               <div className="flex flex-col min-w-0">
-                <span className="text-xl font-black text-blue-600 leading-none">{stats.totalVisits}</span>
-                <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider mt-1 truncate">
+                <span className="text-xl font-black text-primary leading-none">{stats.totalVisits}</span>
+                <span className="text-[11px] text-muted-foreground uppercase font-bold tracking-wider mt-1 truncate">
                   Watering Logs
                 </span>
               </div>
@@ -437,12 +471,12 @@ export default function AdminPage() {
 
           <Card className="shadow-sm border-border bg-card">
             <CardContent className="p-4 flex items-center gap-3.5">
-              <div className="p-3 bg-accent/10 text-accent rounded-xl shrink-0">
+              <div className="p-3 bg-primary/10 text-primary rounded-xl shrink-0">
                 <Camera className="h-5 w-5" />
               </div>
               <div className="flex flex-col min-w-0">
-                <span className="text-xl font-black text-accent leading-none">{stats.totalPhotos}</span>
-                <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider mt-1 truncate">
+                <span className="text-xl font-black text-primary leading-none">{stats.totalPhotos}</span>
+                <span className="text-[11px] text-muted-foreground uppercase font-bold tracking-wider mt-1 truncate">
                   Growth Photos
                 </span>
               </div>
@@ -456,7 +490,7 @@ export default function AdminPage() {
               </div>
               <div className="flex flex-col min-w-0">
                 <span className="text-xl font-black text-rose-600 leading-none">{stats.overdue}</span>
-                <span className="text-[10px] text-rose-600 uppercase font-bold tracking-wider mt-1 truncate">
+                <span className="text-[11px] text-rose-600 uppercase font-bold tracking-wider mt-1 truncate">
                   Overdue Waterings
                 </span>
               </div>
@@ -470,21 +504,21 @@ export default function AdminPage() {
             <Heart className="h-4 w-4 text-emerald-600 shrink-0 fill-current" />
             <div className="flex flex-col text-center sm:text-left">
               <span className="text-sm font-bold text-foreground leading-none">{stats.healthy}</span>
-              <span className="text-[9px] text-muted-foreground uppercase tracking-wider mt-0.5">Healthy</span>
+              <span className="text-[11px] text-muted-foreground uppercase tracking-wider mt-0.5">Healthy</span>
             </div>
           </div>
           <div className="flex items-center gap-2 justify-center border-r border-border/80 last:border-none">
             <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 fill-current" />
             <div className="flex flex-col text-center sm:text-left">
               <span className="text-sm font-bold text-foreground leading-none">{stats.needsAttention}</span>
-              <span className="text-[9px] text-muted-foreground uppercase tracking-wider mt-0.5">Needs Attention</span>
+              <span className="text-[11px] text-muted-foreground uppercase tracking-wider mt-0.5">Needs Attention</span>
             </div>
           </div>
           <div className="flex items-center gap-2 justify-center last:border-none">
             <HeartCrack className="h-4 w-4 text-rose-600 shrink-0 fill-current" />
             <div className="flex flex-col text-center sm:text-left">
               <span className="text-sm font-bold text-foreground leading-none">{stats.dead}</span>
-              <span className="text-[9px] text-muted-foreground uppercase tracking-wider mt-0.5">Dead</span>
+              <span className="text-[11px] text-muted-foreground uppercase tracking-wider mt-0.5">Dead</span>
             </div>
           </div>
         </div>
@@ -512,9 +546,15 @@ export default function AdminPage() {
                   </SelectTrigger>
                   <SelectContent className="bg-card border-border">
                     <SelectItem value="all" className="text-xs font-medium">All Statuses</SelectItem>
-                    <SelectItem value="Healthy" className="text-xs font-medium text-emerald-600">💚 Healthy</SelectItem>
-                    <SelectItem value="Needs Attention" className="text-xs font-medium text-amber-600">💛 Needs Attention</SelectItem>
-                    <SelectItem value="Dead" className="text-xs font-medium text-rose-600">❤️ Dead</SelectItem>
+                    <SelectItem value="Healthy" className="text-xs font-medium text-emerald-600">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 mr-1.5" />Healthy
+                    </SelectItem>
+                    <SelectItem value="Needs Attention" className="text-xs font-medium text-amber-600">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500 mr-1.5" />Needs Attention
+                    </SelectItem>
+                    <SelectItem value="Dead" className="text-xs font-medium text-rose-600">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-rose-500 mr-1.5" />Dead
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -615,7 +655,7 @@ export default function AdminPage() {
                             {format(new Date(tree.planted_date), 'dd MMM yyyy')}
                           </TableCell>
                           <TableCell className="text-center">
-                            <Badge variant="outline" className={cn("text-[9px] font-extrabold uppercase px-1.5 py-0.5 border", sStyle)}>
+                            <Badge variant="outline" className={cn("text-[11px] font-extrabold uppercase px-1.5 py-0.5 border", sStyle)}>
                               {tree.status}
                             </Badge>
                           </TableCell>
@@ -624,11 +664,11 @@ export default function AdminPage() {
                           </TableCell>
                           <TableCell className="text-right">
                             {tree.is_overdue ? (
-                              <Badge variant="outline" className="bg-rose-500/15 border-rose-500/30 text-rose-700 text-[9px] font-black uppercase px-2 py-0.5 animate-pulse">
+                              <Badge variant="outline" className="bg-rose-500/15 border-rose-500/30 text-rose-700 text-[11px] font-black uppercase px-2 py-0.5 animate-pulse">
                                 Overdue {tree.days_overdue} days
                               </Badge>
                             ) : (
-                              <span className="text-[10px] text-muted-foreground font-semibold">
+                              <span className="text-[11px] text-muted-foreground font-semibold">
                                 Tended {tree.days_overdue}d ago
                               </span>
                             )}

@@ -18,8 +18,8 @@ function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const [email, setEmail] = useState(DEMO_EMAIL);
-  const [password, setPassword] = useState(DEMO_PASSWORD);
+  const [email, setEmail] = useState(isMockMode ? DEMO_EMAIL : '');
+  const [password, setPassword] = useState(isMockMode ? DEMO_PASSWORD : '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -86,15 +86,17 @@ function LoginForm() {
               </div>
             )}
   
-            {/* Alert box reminding about staff credentials */}
-            <div className="bg-primary/5 border border-primary/10 text-muted-foreground text-xs p-3 rounded-lg flex gap-2 items-start">
-              <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
-              <p>
-                Fields are pre-filled with default staff credentials 
-                (<code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_EMAIL}</code>).
-              </p>
-            </div>
-  
+            {/* Alert box reminding about demo credentials (mock mode only) */}
+            {isMockMode && (
+              <div className="bg-primary/5 border border-primary/10 text-muted-foreground text-xs p-3 rounded-lg flex gap-2 items-start">
+                <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
+                <p>
+                  Fields are pre-filled with default demo credentials
+                  (<code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_EMAIL}</code>).
+                </p>
+              </div>
+            )}
+
             <div className="space-y-1.5">
               <Label htmlFor="email">Email Address</Label>
               <Input

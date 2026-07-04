@@ -185,7 +185,7 @@ export function updateMockTreeDetails(treeId: number, details: Partial<Tree>) {
   localStorage.setItem('ptr_mock_trees', JSON.stringify(updated));
 }
 
-export function getMockSession(): { email: string; name: string } | null {
+export function getMockSession(): { email: string; name: string; role: 'admin' } | null {
   if (typeof window === 'undefined') return null;
   const stored = localStorage.getItem('ptr_mock_session');
   return stored ? JSON.parse(stored) : null;
@@ -193,7 +193,8 @@ export function getMockSession(): { email: string; name: string } | null {
 
 export function signInMock() {
   if (typeof window === 'undefined') return;
-  const session = { email: 'demo@ptr.org', name: 'Demo Staff' };
+  // Mock mode has a single demo account standing in for both staff and admin.
+  const session = { email: 'demo@ptr.org', name: 'Demo Staff', role: 'admin' as const };
   localStorage.setItem('ptr_mock_session', JSON.stringify(session));
   window.dispatchEvent(new Event('ptr_auth_change'));
 }

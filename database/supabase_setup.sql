@@ -31,36 +31,51 @@ CREATE TABLE IF NOT EXISTS public.tree_logs (
   CONSTRAINT photo_requires_url CHECK (type != 'photo' OR photo_url IS NOT NULL)
 );
 
-CREATE INDEX IF NOT EXISTS tree_logs_tree_id_idx ON public.tree_logs (tree_id);
+-- One row per authenticated user; drives role-based access control.
+-- Auto-provisioned by the on_auth_user_created trigger below (default role: staff).
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email text NOT NULL,
+  display_name text,
+  role text NOT NULL DEFAULT 'staff' CHECK (role IN ('staff', 'admin')),
+  created_at timestamptz DEFAULT now()
+);
 
 -- ============================================================
 -- 2. Idempotently add columns (safe re-runs on existing DBs)
 -- ============================================================
 
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='trees' AND column_name='status'
-  ) THEN
-    ALTER TABLE public.trees ADD COLUMN status text DEFAULT 'Healthy'
-      CHECK (status IN ('Healthy', 'Needs Attention', 'Dead'));
-  END IF;
+ALTER TABLE public.trees ADD COLUMN IF NOT EXISTS status text DEFAULT 'Healthy';
+ALTER TABLE public.trees ADD COLUMN IF NOT EXISTS location text;
+ALTER TABLE public.trees ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+ALTER TABLE public.trees ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES auth.users(id);
+ALTER TABLE public.trees ADD COLUMN IF NOT EXISTS updated_by uuid REFERENCES auth.users(id);
 
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='tree_logs' AND column_name='log_latitude'
-  ) THEN
-    ALTER TABLE public.tree_logs ADD COLUMN log_latitude numeric;
-  END IF;
+ALTER TABLE public.tree_logs ADD COLUMN IF NOT EXISTS log_latitude numeric;
+ALTER TABLE public.tree_logs ADD COLUMN IF NOT EXISTS log_longitude numeric;
+ALTER TABLE public.tree_logs ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES auth.users(id);
 
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_name='tree_logs' AND column_name='log_longitude'
-  ) THEN
-    ALTER TABLE public.tree_logs ADD COLUMN log_longitude numeric;
-  END IF;
-END $$;
+-- Trees historically used a manually-assigned id with no sequence, so there was
+-- no way to register a new tree without hand-picking an id. Back it with a
+-- sequence so future inserts can omit id.
+CREATE SEQUENCE IF NOT EXISTS public.trees_id_seq OWNED BY public.trees.id;
+SELECT setval('public.trees_id_seq', COALESCE((SELECT MAX(id) FROM public.trees), 0) + 1, false);
+ALTER TABLE public.trees ALTER COLUMN id SET DEFAULT nextval('public.trees_id_seq');
+
+-- GPS values from device sensors can glitch; keep obviously-invalid coordinates out.
+ALTER TABLE public.trees DROP CONSTRAINT IF EXISTS trees_latitude_range;
+ALTER TABLE public.trees ADD CONSTRAINT trees_latitude_range CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90);
+ALTER TABLE public.trees DROP CONSTRAINT IF EXISTS trees_longitude_range;
+ALTER TABLE public.trees ADD CONSTRAINT trees_longitude_range CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180);
+
+ALTER TABLE public.tree_logs DROP CONSTRAINT IF EXISTS tree_logs_latitude_range;
+ALTER TABLE public.tree_logs ADD CONSTRAINT tree_logs_latitude_range CHECK (log_latitude IS NULL OR log_latitude BETWEEN -90 AND 90);
+ALTER TABLE public.tree_logs DROP CONSTRAINT IF EXISTS tree_logs_longitude_range;
+ALTER TABLE public.tree_logs ADD CONSTRAINT tree_logs_longitude_range CHECK (log_longitude IS NULL OR log_longitude BETWEEN -180 AND 180);
+
+-- Composite index matches the actual read pattern (all logs for one tree, newest first).
+DROP INDEX IF EXISTS public.tree_logs_tree_id_idx;
+CREATE INDEX IF NOT EXISTS tree_logs_tree_created_idx ON public.tree_logs (tree_id, created_at DESC);
 
 -- ============================================================
 -- 3. Data integrity fixes  (run on existing databases)
@@ -87,55 +102,284 @@ ALTER TABLE public.tree_logs
   CHECK (type != 'photo' OR photo_url IS NOT NULL);
 
 -- ============================================================
--- 4. Row Level Security
+-- 4. Roles: profiles table, auto-provisioning, is_admin() helper
+-- ============================================================
+
+-- SECURITY DEFINER + fixed search_path: reads profiles regardless of the
+-- calling role's RLS grants, and is immune to search_path hijacking.
+-- Safe from recursive-RLS issues because it bypasses RLS on profiles itself.
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role = 'admin'
+  );
+$$;
+
+GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, display_name)
+  VALUES (NEW.id, NEW.email, NEW.email)
+  ON CONFLICT (id) DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Backfill profiles for any users created before this trigger existed.
+INSERT INTO public.profiles (id, email, display_name)
+SELECT id, email, email FROM auth.users
+ON CONFLICT (id) DO NOTHING;
+
+-- ============================================================
+-- 5. Server-stamped audit fields
+--    Client-supplied staff_name / created_by / updated_by are never trusted —
+--    the DB overwrites them from the request's own JWT, closing the
+--    "any authenticated caller can claim to be anyone" gap.
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION public.set_tree_audit_fields()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at := now();
+  NEW.updated_by := auth.uid();
+  IF TG_OP = 'INSERT' THEN
+    NEW.created_by := auth.uid();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trees_audit_fields ON public.trees;
+CREATE TRIGGER trees_audit_fields
+  BEFORE INSERT OR UPDATE ON public.trees
+  FOR EACH ROW EXECUTE FUNCTION public.set_tree_audit_fields();
+
+CREATE OR REPLACE FUNCTION public.set_tree_log_author()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.created_by := auth.uid();
+  NEW.staff_name := COALESCE(auth.jwt() ->> 'email', 'Unknown Staff');
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tree_logs_set_author ON public.tree_logs;
+CREATE TRIGGER tree_logs_set_author
+  BEFORE INSERT ON public.tree_logs
+  FOR EACH ROW EXECUTE FUNCTION public.set_tree_log_author();
+
+-- ============================================================
+-- 6. Atomic write RPCs
+--    Each function does its log-insert + tree-status-update (or detail edit)
+--    inside a single transaction, so a mid-write failure can no longer leave
+--    a log recorded without its status update (or vice versa).
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION public.log_tree_visit(
+  p_tree_id integer,
+  p_status text,
+  p_note text DEFAULT NULL,
+  p_created_at timestamptz DEFAULT NULL
+) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  INSERT INTO public.tree_logs (tree_id, type, note, created_at)
+  VALUES (p_tree_id, 'visit', p_note, COALESCE(p_created_at, now()));
+
+  UPDATE public.trees SET status = p_status WHERE id = p_tree_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.log_tree_visit(integer, text, text, timestamptz) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.log_tree_photo(
+  p_tree_id integer,
+  p_status text,
+  p_photo_url text,
+  p_note text DEFAULT NULL,
+  p_lat numeric DEFAULT NULL,
+  p_lng numeric DEFAULT NULL,
+  p_created_at timestamptz DEFAULT NULL
+) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+  IF p_photo_url IS NULL THEN
+    RAISE EXCEPTION 'photo_url is required for photo logs';
+  END IF;
+
+  INSERT INTO public.tree_logs (tree_id, type, photo_url, note, log_latitude, log_longitude, created_at)
+  VALUES (p_tree_id, 'photo', p_photo_url, p_note, p_lat, p_lng, COALESCE(p_created_at, now()));
+
+  UPDATE public.trees SET status = p_status WHERE id = p_tree_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.log_tree_photo(integer, text, text, text, numeric, numeric, timestamptz) TO authenticated;
+
+-- Editing core tree identity (not just logging a visit) is an admin action —
+-- matches the role split the README already documented but never enforced.
+CREATE OR REPLACE FUNCTION public.update_tree_details(
+  p_tree_id integer,
+  p_planter_name text,
+  p_species text,
+  p_planted_date date,
+  p_location text,
+  p_main_photo_url text DEFAULT NULL
+) RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NOT public.is_admin() THEN
+    RAISE EXCEPTION 'Admin role required to edit tree details';
+  END IF;
+
+  UPDATE public.trees
+  SET planter_name = p_planter_name,
+      species = p_species,
+      planted_date = p_planted_date,
+      location = p_location,
+      main_photo_url = COALESCE(p_main_photo_url, main_photo_url)
+  WHERE id = p_tree_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_tree_details(integer, text, text, date, text, text) TO authenticated;
+
+-- ============================================================
+-- 7. Dashboard aggregation view
+--    Pre-aggregates visit/photo counts and last-activity per tree in SQL so
+--    the admin dashboard no longer has to download the entire tree_logs
+--    table to the browser just to compute counters — this is the part of
+--    the app whose payload grows unbounded as logs accumulate.
+-- ============================================================
+
+CREATE OR REPLACE VIEW public.tree_dashboard_view AS
+SELECT
+  t.*,
+  COALESCE(v.visit_count, 0) AS total_visits,
+  COALESCE(p.photo_count, 0) AS total_photos,
+  GREATEST(v.last_visit, p.last_photo) AS last_activity_at
+FROM public.trees t
+LEFT JOIN (
+  SELECT tree_id, count(*) AS visit_count, max(created_at) AS last_visit
+  FROM public.tree_logs WHERE type = 'visit' GROUP BY tree_id
+) v ON v.tree_id = t.id
+LEFT JOIN (
+  SELECT tree_id, count(*) AS photo_count, max(created_at) AS last_photo
+  FROM public.tree_logs WHERE type = 'photo' GROUP BY tree_id
+) p ON p.tree_id = t.id;
+
+GRANT SELECT ON public.tree_dashboard_view TO anon, authenticated;
+
+-- ============================================================
+-- 8. Row Level Security
 -- ============================================================
 
 ALTER TABLE public.trees ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tree_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================
--- 5. RLS Policies
+-- 9. RLS Policies
 -- ============================================================
 
 DROP POLICY IF EXISTS "Allow public read trees" ON public.trees;
 DROP POLICY IF EXISTS "Allow authenticated insert trees" ON public.trees;
 DROP POLICY IF EXISTS "Allow authenticated update trees" ON public.trees;
+DROP POLICY IF EXISTS "Allow admin insert trees" ON public.trees;
+DROP POLICY IF EXISTS "Allow admin update trees" ON public.trees;
 DROP POLICY IF EXISTS "Allow public read tree_logs" ON public.tree_logs;
 DROP POLICY IF EXISTS "Allow authenticated insert tree_logs" ON public.tree_logs;
 DROP POLICY IF EXISTS "Allow authenticated update tree_logs" ON public.tree_logs;
+DROP POLICY IF EXISTS "Allow admin insert tree_logs" ON public.tree_logs;
+DROP POLICY IF EXISTS "Allow owner or admin update tree_logs" ON public.tree_logs;
+DROP POLICY IF EXISTS "Users can read own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Admins can read all profiles" ON public.profiles;
 
--- Trees: anyone can read; only authenticated staff can write
+-- Trees: anyone can read (public QR scan); mutations go through the RPCs
+-- above (SECURITY DEFINER, bypass RLS) or, for direct table access, admins only.
 CREATE POLICY "Allow public read trees" ON public.trees
   FOR SELECT USING (true);
 
-CREATE POLICY "Allow authenticated insert trees" ON public.trees
-  FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY "Allow admin insert trees" ON public.trees
+  FOR INSERT TO authenticated WITH CHECK (public.is_admin());
 
-CREATE POLICY "Allow authenticated update trees" ON public.trees
-  FOR UPDATE TO authenticated WITH CHECK (true);
+CREATE POLICY "Allow admin update trees" ON public.trees
+  FOR UPDATE TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
 
--- Tree logs: anyone can read; only authenticated staff can insert or correct entries
+-- Tree logs: anyone can read; direct writes (outside the RPCs) are admin-only.
+-- Staff log visits/photos exclusively through log_tree_visit / log_tree_photo.
 CREATE POLICY "Allow public read tree_logs" ON public.tree_logs
   FOR SELECT USING (true);
 
-CREATE POLICY "Allow authenticated insert tree_logs" ON public.tree_logs
-  FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY "Allow admin insert tree_logs" ON public.tree_logs
+  FOR INSERT TO authenticated WITH CHECK (public.is_admin());
 
--- Allows staff to correct a log they submitted (e.g. fix a note or type)
-CREATE POLICY "Allow authenticated update tree_logs" ON public.tree_logs
-  FOR UPDATE TO authenticated WITH CHECK (true);
+CREATE POLICY "Allow owner or admin update tree_logs" ON public.tree_logs
+  FOR UPDATE TO authenticated
+  USING (created_by = auth.uid() OR public.is_admin())
+  WITH CHECK (created_by = auth.uid() OR public.is_admin());
+
+-- Profiles: users can see their own row; admins can see everyone's (needed to
+-- manage staff). is_admin() itself bypasses this via SECURITY DEFINER.
+CREATE POLICY "Users can read own profile" ON public.profiles
+  FOR SELECT TO authenticated USING (id = auth.uid());
+
+CREATE POLICY "Admins can read all profiles" ON public.profiles
+  FOR SELECT TO authenticated USING (public.is_admin());
 
 -- ============================================================
--- 6. Storage bucket: tree-photos
+-- 10. Storage bucket: tree-photos
 -- ============================================================
 
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('tree-photos', 'tree-photos', true)
-ON CONFLICT (id) DO NOTHING;
+-- file_size_limit/allowed_mime_types cap uploads server-side — previously
+-- only the client's canvas compression limited size, which a direct API
+-- call could bypass entirely.
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('tree-photos', 'tree-photos', true, 5242880, ARRAY['image/jpeg', 'image/png', 'image/webp'])
+ON CONFLICT (id) DO UPDATE SET
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
 
 DROP POLICY IF EXISTS "Allow public read tree-photos" ON storage.objects;
 DROP POLICY IF EXISTS "Allow authenticated upload tree-photos" ON storage.objects;
 DROP POLICY IF EXISTS "Allow authenticated delete tree-photos" ON storage.objects;
+DROP POLICY IF EXISTS "Allow owner or admin delete tree-photos" ON storage.objects;
 
 CREATE POLICY "Allow public read tree-photos"
 ON storage.objects FOR SELECT
@@ -146,14 +390,15 @@ ON storage.objects FOR INSERT
 TO authenticated
 WITH CHECK (bucket_id = 'tree-photos');
 
--- Allows staff to remove a photo they uploaded by mistake
-CREATE POLICY "Allow authenticated delete tree-photos"
+-- Only the uploader (or an admin) can delete a photo — previously any
+-- authenticated staff account could delete any file in the shared bucket.
+CREATE POLICY "Allow owner or admin delete tree-photos"
 ON storage.objects FOR DELETE
 TO authenticated
-USING (bucket_id = 'tree-photos');
+USING (bucket_id = 'tree-photos' AND (owner = auth.uid() OR public.is_admin()));
 
 -- ============================================================
--- 7. Seed 50 Trees  (ON CONFLICT DO NOTHING — safe to re-run)
+-- 11. Seed 50 Trees  (ON CONFLICT DO NOTHING — safe to re-run)
 -- ============================================================
 
 INSERT INTO public.trees (id, planter_name, species, planted_date, main_photo_url, latitude, longitude, status) VALUES
@@ -209,8 +454,12 @@ INSERT INTO public.trees (id, planter_name, species, planted_date, main_photo_ur
 (50, 'Sanjay Hembrom',  'Bamboo (Dendrocalamus strictus)','2026-06-25', '/demo/tree_growing.png', 23.90340, 84.17340, 'Healthy')
 ON CONFLICT (id) DO NOTHING;
 
+-- Backfill location on the seed rows (matches the mock-mode defaults in mockData.ts)
+UPDATE public.trees SET location = 'Qila Grassland' WHERE id = 1 AND location IS NULL;
+UPDATE public.trees SET location = 'Kasturba School, PTR' WHERE id != 1 AND location IS NULL;
+
 -- ============================================================
--- 8. Seed sample logs for Trees 1 & 2
+-- 12. Seed sample logs for Trees 1 & 2
 --    Photo logs now include photo_url to satisfy the constraint
 -- ============================================================
 

@@ -100,7 +100,7 @@ export default function Navbar() {
             <span className="font-sans text-sm font-semibold tracking-wide uppercase text-primary">
               Palamau Tiger Reserve
             </span>
-            <span className="text-[10px] tracking-widest text-muted-foreground uppercase">
+            <span className="text-[11px] tracking-widest text-muted-foreground uppercase">
               Tree Tracker (PTR)
             </span>
           </div>
@@ -110,7 +110,7 @@ export default function Navbar() {
           {user ? (
             <>
               {queueCount > 0 && (
-                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-600 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-full animate-pulse">
+                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-600 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-full animate-pulse">
                   <RefreshCw className="h-3 w-3 animate-spin text-amber-500" />
                   {queueCount} pending
                 </span>

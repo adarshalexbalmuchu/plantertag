@@ -6,15 +6,16 @@ import { getMockTrees, getMockLogs } from '@/lib/mockData';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { buttonVariants } from '@/components/ui/button';
-import { 
-  Calendar, 
-  MapPin, 
-  User, 
-  Droplet, 
-  Clock, 
-  ChevronRight, 
+import {
+  Calendar,
+  MapPin,
+  User,
+  Droplet,
+  Clock,
+  ChevronRight,
   ExternalLink,
-  ShieldCheck
+  ShieldCheck,
+  AlertTriangle
 } from 'lucide-react';
 import { format, differenceInDays } from 'date-fns';
 import { cn } from '@/lib/utils';
@@ -145,9 +146,10 @@ export default async function TreePage({ params }: PageProps) {
         
         {/* Overdue Warning Notification (Subtle text for public-facing page) */}
         {isOverdue && (
-          <div className="mb-4 bg-amber-500/5 border border-amber-500/10 rounded-xl p-3.5 text-center">
+          <div className="mb-4 bg-amber-500/5 border border-amber-500/10 rounded-lg p-3 flex items-center justify-center gap-1.5">
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-700 shrink-0" />
             <p className="text-xs text-amber-700 font-medium">
-              ⚠️ Last tended {daysSinceLastTended} days ago
+              Last tended {daysSinceLastTended} days ago
             </p>
           </div>
         )}
@@ -161,7 +163,7 @@ export default async function TreePage({ params }: PageProps) {
               </div>
               <div className="flex flex-col">
                 <span className="text-2xl font-bold text-primary">{visitCount}</span>
-                <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
+                <span className="text-[11px] text-muted-foreground uppercase font-bold tracking-wider">
                   Tended / Watered
                 </span>
               </div>
@@ -177,7 +179,7 @@ export default async function TreePage({ params }: PageProps) {
                 <span className="text-xs font-bold text-foreground">
                   {format(new Date(tree.planted_date), 'MMM yyyy')}
                 </span>
-                <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
+                <span className="text-[11px] text-muted-foreground uppercase font-bold tracking-wider">
                   Date Planted
                 </span>
               </div>
@@ -281,14 +283,14 @@ export default async function TreePage({ params }: PageProps) {
                   {/* Log Content */}
                   <div className="bg-card border border-border p-4 rounded-xl shadow-sm">
                     <div className="flex justify-between items-start gap-2 mb-2">
-                      <Badge variant="outline" className={`text-[10px] font-bold tracking-wide uppercase px-2 py-0.5 ${
+                      <Badge variant="outline" className={`text-[11px] font-bold tracking-wide uppercase px-2 py-0.5 ${
                         log.type === 'photo' 
                           ? 'border-accent/30 text-accent bg-accent/5' 
                           : 'border-primary/30 text-primary bg-primary/5'
                       }`}>
                         {log.type === 'photo' ? 'Growth Photo' : 'Watering Visit'}
                       </Badge>
-                      <span className="text-[10px] text-muted-foreground font-medium">
+                      <span className="text-[11px] text-muted-foreground font-medium">
                         {format(new Date(log.created_at), 'dd MMM yyyy')}
                       </span>
                     </div>
@@ -311,13 +313,13 @@ export default async function TreePage({ params }: PageProps) {
                     )}
 
                     <div className="flex flex-wrap justify-between items-center gap-2 mt-2 pt-2 border-t border-border/40">
-                      <p className="text-[10px] text-muted-foreground flex items-center gap-1 font-semibold">
+                      <p className="text-[11px] text-muted-foreground flex items-center gap-1 font-semibold">
                         <User className="h-3 w-3" /> Logged by Forest Guard, PTR
                       </p>
 
                       {/* GPS Verified Badge */}
                       {log.log_latitude && log.log_longitude && (
-                        <span className="inline-flex items-center gap-0.5 text-[9px] text-emerald-600 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-full font-bold uppercase">
+                        <span className="inline-flex items-center gap-0.5 text-[11px] text-emerald-600 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-full font-bold uppercase">
                           <ShieldCheck className="h-3 w-3 text-emerald-600" /> Location Verified
                         </span>
                       )}

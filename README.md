@@ -12,7 +12,7 @@ Scanning a tree's printed QR tag directs users to its public growth log. Staff c
 - **Staff Portal & Verification (`/login`)**: Secure Supabase email/password authentication.
 - **Staff Updates (`/tree/[id]/update`)**: Quick, low-friction mobile forms. The photo upload immediately invokes the phone's native camera (`capture="environment"`).
 - **Admin Control Panel (`/admin`)**: Sortable, searchable data-table of all 50 seeded trees. Individual QR code previews and single downloads.
-- **Printable QR Sheet (`/admin/print`)**: A print-ready tag layout containing reserve logos, tree species, ID labels, and high-fidelity QR codes sized for sticker or metal tag printing.
+- **Printable QR Sheet (`/admin/qr-codes`)**: A print-ready tag layout containing reserve logos, tree species, ID labels, and high-fidelity QR codes sized for sticker or metal tag printing.
 - **Seed Data**: Preloaded with 50 realistic trees situated in the Palamu Tiger Reserve GPS bounds and historical watering logs.
 
 ---
@@ -33,7 +33,7 @@ Scanning a tree's printed QR tag directs users to its public growth log. Staff c
 ### 1. Database Configuration (Supabase)
 1. Create a new project in the [Supabase Dashboard](https://supabase.com).
 2. Open the **SQL Editor** in your Supabase project.
-3. Copy the contents of the [`supabase_schema.sql`](file:///c:/Users/avish/Desktop/PLANTER%20TAGS/supabase_schema.sql) file and execute it. This creates the tables, indexes, RLS policies, storage bucket configurations, and seeds the 50 trees.
+3. Copy the contents of [`database/supabase_setup.sql`](database/supabase_setup.sql) and execute it. This creates the tables, roles/profiles, atomic write RPCs, RLS policies, storage bucket configuration, and seeds the 50 trees. The script is idempotent — safe to re-run any time you pull schema changes.
 
 ### 2. Configure Environment Variables
 1. Rename or copy `.env.example` to `.env.local`:
@@ -47,16 +47,16 @@ Scanning a tree's printed QR tag directs users to its public growth log. Staff c
    ```
 
 ### 3. Create a Staff & Admin Account
-To access `/tree/[id]/update` or `/admin`, staff must log in:
+To access `/tree/[id]/update` or `/admin`, staff must log in. Every new Supabase Auth user is automatically given a row in `public.profiles` with `role = 'staff'` (via the `on_auth_user_created` trigger) — staff can log visits and growth photos, but cannot edit core tree details or open `/admin`.
+
 1. Navigate to **Authentication -> Users** in your Supabase dashboard and click **Add User -> Create User**.
-2. To assign the **Admin** role (which grants access to `/admin` and DDL edit policies):
-   Run the following query in the Supabase SQL editor to set the user's role metadata:
+2. To promote an account to **admin** (grants access to `/admin`, `/admin/qr-codes`, and editing core tree details), run in the SQL editor:
    ```sql
-   UPDATE auth.users 
-   SET raw_user_meta_data = raw_user_meta_data || '{"role": "admin"}'::jsonb 
-   WHERE email = 'admin-email@example.com';
+   UPDATE public.profiles SET role = 'admin' WHERE email = 'admin-email@example.com';
    ```
-   *(Replace `'admin-email@example.com'` with your newly created admin account's email).*
+   *(Replace `'admin-email@example.com'` with your newly created account's email).*
+
+> Note: the app's demo login form pre-fills `demo@ptr.org` / `demo1234` **only when running in mock mode** (no Supabase env vars configured). Once real Supabase credentials are set, the demo hint disappears and the fields start empty — don't reintroduce hardcoded/visible credentials for a real deployment.
 
 ### 4. Run Locally
 Install the dependencies and start the development server:
@@ -65,6 +65,18 @@ npm install
 npm run dev
 ```
 Open [http://localhost:3000](http://localhost:3000) on your local browser.
+
+---
+
+## 🔒 Security & Scale Notes
+
+- **Roles**: `public.profiles.role` (`staff` | `admin`) is enforced in Postgres RLS and inside the write RPCs — not just in the UI. Staff log visits/photos through `log_tree_visit` / `log_tree_photo`; only admins can call `update_tree_details` or open `/admin`.
+- **Atomic writes**: logging a visit/photo and updating the tree's status happen inside a single RPC (one transaction), so a network blip mid-write can't leave a log recorded without its status update.
+- **Server-stamped audit fields**: `staff_name`, `created_by`, `updated_by` are set by database triggers from the caller's JWT — never trusted from the client, so one authenticated account can't spoof another's identity in the log trail.
+- **Storage**: the `tree-photos` bucket enforces a 5&nbsp;MB file-size limit and an image-only MIME allowlist server-side (previously only client-side canvas compression limited uploads). Only the uploader or an admin can delete a photo.
+- **Offline sync**: a failed queued item no longer blocks every other queued item — it's skipped and retried on the next sync (up to 5 attempts) instead of aborting the whole queue.
+- **Dashboard scale**: `/admin` reads from `tree_dashboard_view`, which pre-aggregates visit/photo counts in SQL, instead of downloading the full `tree_logs` table to the browser — keeps the dashboard fast as logs accumulate well beyond the current 50 seeded trees.
+- Supabase's hosted connection pooler (Supavisor) handles concurrent connections for you — no extra configuration needed for ~100 concurrent users at this schema's scale.
 
 ---
 

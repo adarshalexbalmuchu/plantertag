@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { supabase, isMockMode } from '@/lib/supabase';
+import { supabase, isMockMode, getCurrentProfile } from '@/lib/supabase';
 import { getMockTrees, getMockSession, signInMock } from '@/lib/mockData';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -39,14 +39,15 @@ interface Tree {
 export default function QrCodesPage() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [trees, setTrees] = useState<Tree[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Login form pre-filled
-  const [loginEmail, setLoginEmail] = useState(DEMO_EMAIL);
-  const [loginPassword, setLoginPassword] = useState(DEMO_PASSWORD);
+  // Login form pre-filled (mock mode only)
+  const [loginEmail, setLoginEmail] = useState(isMockMode ? DEMO_EMAIL : '');
+  const [loginPassword, setLoginPassword] = useState(isMockMode ? DEMO_PASSWORD : '');
 
   // Fetch trees list
   const fetchTrees = async () => {
@@ -71,16 +72,19 @@ export default function QrCodesPage() {
     if (isMockMode) {
       const session = getMockSession();
       setUser(session);
+      setIsAdmin(session?.role === 'admin');
       if (session) {
         fetchTrees();
       }
       setLoading(false);
     } else {
       // Check initial session
-      supabase.auth.getSession().then(({ data: { session } }) => {
+      supabase.auth.getSession().then(async ({ data: { session } }) => {
         setUser(session?.user ?? null);
         if (session?.user) {
-          fetchTrees();
+          const profile = await getCurrentProfile();
+          setIsAdmin(profile?.role === 'admin');
+          if (profile?.role === 'admin') fetchTrees();
         }
         setLoading(false);
       });
@@ -89,7 +93,12 @@ export default function QrCodesPage() {
       const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
         setUser(session?.user ?? null);
         if (session?.user) {
-          fetchTrees();
+          getCurrentProfile().then((profile) => {
+            setIsAdmin(profile?.role === 'admin');
+            if (profile?.role === 'admin') fetchTrees();
+          });
+        } else {
+          setIsAdmin(false);
         }
       });
 
@@ -106,6 +115,7 @@ export default function QrCodesPage() {
       if (loginEmail === DEMO_EMAIL && loginPassword === DEMO_PASSWORD) {
         signInMock();
         setUser({ email: DEMO_EMAIL, name: 'Demo Staff' });
+        setIsAdmin(true);
         fetchTrees();
       } else {
         setError('Invalid credentials.');
@@ -121,7 +131,9 @@ export default function QrCodesPage() {
         setError(loginErr.message || 'Invalid credentials.');
       } else {
         setUser(data.user);
-        fetchTrees();
+        const profile = await getCurrentProfile();
+        setIsAdmin(profile?.role === 'admin');
+        if (profile?.role === 'admin') fetchTrees();
       }
       setActionLoading(null);
     }
@@ -186,12 +198,14 @@ export default function QrCodesPage() {
                 </div>
               )}
 
-              <div className="bg-primary/5 border border-primary/10 text-muted-foreground text-xs p-3 rounded-lg flex gap-2 items-start">
-                <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
-                <p>
-                  Default staff credentials pre-filled. Just click <strong>Sign In</strong> to load the QR tags.
-                </p>
-              </div>
+              {isMockMode && (
+                <div className="bg-primary/5 border border-primary/10 text-muted-foreground text-xs p-3 rounded-lg flex gap-2 items-start">
+                  <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
+                  <p>
+                    Default demo credentials pre-filled. Just click <strong>Sign In</strong> to load the QR tags.
+                  </p>
+                </div>
+              )}
 
               <div className="space-y-1.5">
                 <Label htmlFor="email">Email Address</Label>
@@ -239,6 +253,28 @@ export default function QrCodesPage() {
               </Button>
             </CardFooter>
           </form>
+        </Card>
+      </div>
+    );
+  }
+
+  // RENDER ACCESS DENIED FOR NON-ADMIN STAFF
+  if (!isAdmin) {
+    return (
+      <div className="min-h-screen bg-background flex flex-col justify-center items-center px-4 text-center">
+        <Card className="w-full max-w-sm border-border p-6 shadow-md bg-card">
+          <div className="h-16 w-16 bg-destructive/10 text-destructive rounded-full flex items-center justify-center mx-auto mb-4">
+            <ShieldAlert className="h-8 w-8" />
+          </div>
+          <h2 className="text-xl font-bold text-foreground">Admin Access Required</h2>
+          <p className="text-sm text-muted-foreground mt-2">
+            Printing QR tags requires an admin account.
+          </p>
+          <div className="mt-6">
+            <Link href="/admin" className={cn(buttonVariants({ variant: 'outline' }), "w-full border-border")}>
+              Back to Admin
+            </Link>
+          </div>
         </Card>
       </div>
     );

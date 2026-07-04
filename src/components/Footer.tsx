@@ -18,7 +18,7 @@ export default function Footer() {
               <span className="text-xs font-semibold tracking-wider text-primary uppercase">
                 Palamau Tiger Reserve
               </span>
-              <span className="text-[9px] tracking-wide uppercase">
+              <span className="text-[11px] tracking-wide uppercase">
                 Forest & Environment Department
               </span>
             </div>
@@ -26,7 +26,7 @@ export default function Footer() {
           <p className="text-center text-xs text-muted-foreground sm:text-right">
             &copy; {new Date().getFullYear()} Palamau Tiger Reserve. Government of Jharkhand.
             <br />
-            <span className="text-[10px] opacity-70">QR Tree Tracker (PTR) Initiative</span>
+            <span className="text-[11px] opacity-70">QR Tree Tracker (PTR) Initiative</span>
           </p>
         </div>
       </div>

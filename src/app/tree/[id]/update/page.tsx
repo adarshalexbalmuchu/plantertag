@@ -4,7 +4,7 @@ import { useState, useEffect, use } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { supabase, isMockMode } from '@/lib/supabase';
+import { supabase, isMockMode, getCurrentProfile } from '@/lib/supabase';
 import { getMockTrees, addMockLog, updateMockTreeStatus, getMockSession, signInMock, updateMockTreeDetails } from '@/lib/mockData';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
@@ -42,6 +42,7 @@ export default function UpdateTreePage({ params }: PageProps) {
 
   const [tree, setTree] = useState<any>(null);
   const [user, setUser] = useState<any>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null); // 'visit' | 'photo' | 'login' | 'edit'
   const [gpsStatus, setGpsStatus] = useState<string | null>(null); // message for GPS capture
@@ -50,8 +51,8 @@ export default function UpdateTreePage({ params }: PageProps) {
   const [queueCount, setQueueCount] = useState(0);
 
   // Login form states
-  const [loginEmail, setLoginEmail] = useState(DEMO_EMAIL);
-  const [loginPassword, setLoginPassword] = useState(DEMO_PASSWORD);
+  const [loginEmail, setLoginEmail] = useState(isMockMode ? DEMO_EMAIL : '');
+  const [loginPassword, setLoginPassword] = useState(isMockMode ? DEMO_PASSWORD : '');
 
   // Form states
   const [status, setStatus] = useState<string>('Healthy');
@@ -131,6 +132,7 @@ export default function UpdateTreePage({ params }: PageProps) {
       (async () => {
         const session = getMockSession();
         setUser(session);
+        setIsAdmin(session?.role === 'admin');
         if (session) {
           await fetchTree();
         }
@@ -140,6 +142,8 @@ export default function UpdateTreePage({ params }: PageProps) {
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         setUser(session?.user ?? null);
         if (session?.user) {
+          const profile = await getCurrentProfile();
+          setIsAdmin(profile?.role === 'admin');
           await fetchTree();
         }
         setLoading(false);
@@ -148,7 +152,10 @@ export default function UpdateTreePage({ params }: PageProps) {
       const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
         setUser(session?.user ?? null);
         if (session?.user) {
+          getCurrentProfile().then((profile) => setIsAdmin(profile?.role === 'admin'));
           fetchTree();
+        } else {
+          setIsAdmin(false);
         }
       });
 
@@ -181,6 +188,7 @@ export default function UpdateTreePage({ params }: PageProps) {
       if (loginEmail === DEMO_EMAIL && loginPassword === DEMO_PASSWORD) {
         signInMock();
         setUser({ email: DEMO_EMAIL, name: 'Demo Staff' });
+        setIsAdmin(true);
         setSuccess('Logged in successfully!');
         setTimeout(() => setSuccess(null), 1200);
       } else {
@@ -197,6 +205,8 @@ export default function UpdateTreePage({ params }: PageProps) {
         setError(loginErr.message || 'Invalid email or password.');
       } else {
         setUser(data.user);
+        const profile = await getCurrentProfile();
+        setIsAdmin(profile?.role === 'admin');
         setSuccess('Logged in successfully!');
         setTimeout(() => setSuccess(null), 1200);
       }
@@ -268,25 +278,15 @@ export default function UpdateTreePage({ params }: PageProps) {
         });
         updateMockTreeStatus(tree.id, status);
       } else {
-        // a) Insert the watering log
-        const { error: logErr } = await supabase
-          .from('tree_logs')
-          .insert({
-            tree_id: tree.id,
-            type: 'visit',
-            note: note.trim() || null,
-            staff_name: user.email,
-          });
+        // Single atomic RPC: inserts the log and updates tree status together,
+        // so a mid-write failure can't leave one half applied without the other.
+        const { error: rpcErr } = await supabase.rpc('log_tree_visit', {
+          p_tree_id: tree.id,
+          p_status: status,
+          p_note: note.trim() || null,
+        });
 
-        if (logErr) throw logErr;
-
-        // b) Update tree survival status
-        const { error: statusErr } = await supabase
-          .from('trees')
-          .update({ status })
-          .eq('id', tree.id);
-
-        if (statusErr) throw statusErr;
+        if (rpcErr) throw rpcErr;
       }
 
       setSuccess('Watering & tending visit logged successfully!');
@@ -332,6 +332,7 @@ export default function UpdateTreePage({ params }: PageProps) {
     setSuccess(null);
 
     let coords: { latitude: number | null, longitude: number | null } = { latitude: null, longitude: null };
+    let compressedBlob: Blob | null = null;
     try {
       // Step A: Capture GPS coordinates first (non-blocking)
       coords = await getGpsCoordinates();
@@ -374,6 +375,7 @@ export default function UpdateTreePage({ params }: PageProps) {
       });
 
       if (!blob) throw new Error('Image compression failed');
+      compressedBlob = blob;
 
       // Offline check
       if (typeof window !== 'undefined' && !navigator.onLine) {
@@ -418,17 +420,18 @@ export default function UpdateTreePage({ params }: PageProps) {
         });
         updateMockTreeStatus(tree.id, status);
       } else {
-        // Step C: Upload the compressed JPEG to Supabase Storage bucket 'tree-photos'
-        const fileExt = 'jpg';
-        const fileName = `tree-${tree.id}-${Date.now()}.${fileExt}`;
-        
+        // Step C: Upload the compressed JPEG to Supabase Storage bucket 'tree-photos'.
+        // A random suffix (not just Date.now()) rules out filename collisions between
+        // concurrent uploads, and since every name is unique we never need to upsert.
+        const fileName = `tree-${tree.id}-${crypto.randomUUID()}.jpg`;
+
         setGpsStatus('Uploading growth photo...');
-        const { data: uploadData, error: uploadErr } = await supabase.storage
+        const { error: uploadErr } = await supabase.storage
           .from('tree-photos')
           .upload(fileName, blob, {
             contentType: 'image/jpeg',
-            cacheControl: '3600',
-            upsert: true
+            cacheControl: '31536000',
+            upsert: false
           });
 
         if (uploadErr) throw uploadErr;
@@ -438,28 +441,17 @@ export default function UpdateTreePage({ params }: PageProps) {
           .from('tree-photos')
           .getPublicUrl(fileName);
 
-        // Step D: Insert the log with coordinates into database
-        const { error: logErr } = await supabase
-          .from('tree_logs')
-          .insert({
-            tree_id: tree.id,
-            type: 'photo',
-            photo_url: publicUrl,
-            note: note.trim() || null,
-            log_latitude: coords.latitude,
-            log_longitude: coords.longitude,
-            staff_name: user.email,
-          });
+        // Step D: Single atomic RPC — inserts the log and updates tree status together.
+        const { error: rpcErr } = await supabase.rpc('log_tree_photo', {
+          p_tree_id: tree.id,
+          p_status: status,
+          p_photo_url: publicUrl,
+          p_note: note.trim() || null,
+          p_lat: coords.latitude,
+          p_lng: coords.longitude,
+        });
 
-        if (logErr) throw logErr;
-
-        // Step E: Update tree status
-        const { error: statusErr } = await supabase
-          .from('trees')
-          .update({ status })
-          .eq('id', tree.id);
-
-        if (statusErr) throw statusErr;
+        if (rpcErr) throw rpcErr;
       }
 
       setSuccess('Growth photo and status updated successfully!');
@@ -477,15 +469,10 @@ export default function UpdateTreePage({ params }: PageProps) {
     } catch (err: any) {
       console.warn('Upload photo error, falling back to offline queue:', err);
       try {
-        let fallbackBlob: Blob = selectedFile;
-        // If image compressed successfully, use that instead of original file
-        const blob = await new Promise<Blob | null>((resolve) => {
-          const canvas = document.createElement('canvas');
-          canvas.width = 100;
-          canvas.height = 100;
-          canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.82);
-        });
-        
+        // Reuse the already-compressed image if we got that far; otherwise fall
+        // back to the original file rather than losing the photo entirely.
+        const fallbackBlob: Blob = compressedBlob || selectedFile;
+
         await addToQueue({
           tree_id: tree.id,
           type: 'photo',
@@ -518,6 +505,10 @@ export default function UpdateTreePage({ params }: PageProps) {
   const handleEditDetails = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !tree) return;
+    if (!isAdmin) {
+      setError('Admin access required to edit tree details.');
+      return;
+    }
     setActionLoading('edit');
     setError(null);
     setSuccess(null);
@@ -594,14 +585,13 @@ export default function UpdateTreePage({ params }: PageProps) {
         if (isMockMode) {
           bannerPhotoUrl = await blobToBase64(bannerBlob);
         } else {
-          const fileExt = 'jpg';
-          const fileName = `tree-banner-${tree.id}-${Date.now()}.${fileExt}`;
+          const fileName = `tree-banner-${tree.id}-${crypto.randomUUID()}.jpg`;
           const { error: uploadErr } = await supabase.storage
             .from('tree-photos')
             .upload(fileName, bannerBlob, {
               contentType: 'image/jpeg',
-              cacheControl: '3600',
-              upsert: true
+              cacheControl: '31536000',
+              upsert: false
             });
           if (uploadErr) throw uploadErr;
 
@@ -612,24 +602,28 @@ export default function UpdateTreePage({ params }: PageProps) {
         }
       }
 
-      const updateData: any = {
-        planter_name: editPlanterName,
-        species: editSpecies,
-        planted_date: editPlantedDate,
-        location: editLocation
-      };
-      if (bannerPhotoUrl) {
-        updateData.main_photo_url = bannerPhotoUrl;
-      }
-
       if (isMockMode) {
+        const updateData: any = {
+          planter_name: editPlanterName,
+          species: editSpecies,
+          planted_date: editPlantedDate,
+          location: editLocation
+        };
+        if (bannerPhotoUrl) {
+          updateData.main_photo_url = bannerPhotoUrl;
+        }
         updateMockTreeDetails(tree.id, updateData);
       } else {
-        const { error: updateErr } = await supabase
-          .from('trees')
-          .update(updateData)
-          .eq('id', tree.id);
-        if (updateErr) throw updateErr;
+        // Single atomic RPC, admin-only enforced server-side too.
+        const { error: rpcErr } = await supabase.rpc('update_tree_details', {
+          p_tree_id: tree.id,
+          p_planter_name: editPlanterName,
+          p_species: editSpecies,
+          p_planted_date: editPlantedDate,
+          p_location: editLocation,
+          p_main_photo_url: bannerPhotoUrl || null,
+        });
+        if (rpcErr) throw rpcErr;
       }
 
       setSuccess('Tree details updated.');
@@ -645,7 +639,7 @@ export default function UpdateTreePage({ params }: PageProps) {
     } catch (err: any) {
       console.warn('Edit details error, falling back to offline queue:', err);
       try {
-        let fallbackBlob: Blob | undefined = selectedBannerFile || undefined;
+        const fallbackBlob: Blob | undefined = bannerBlob || selectedBannerFile || undefined;
         await addToQueue({
           tree_id: tree.id,
           type: 'edit',
@@ -742,14 +736,16 @@ export default function UpdateTreePage({ params }: PageProps) {
                   </div>
                 )}
 
-                <div className="bg-primary/5 border border-primary/10 text-muted-foreground text-xs p-3 rounded-lg flex gap-2 items-start">
-                  <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
-                  <p>
-                    Pre-filled staff credentials:<br />
-                    Email: <code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_EMAIL}</code><br />
-                    Password: <code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_PASSWORD}</code>
-                  </p>
-                </div>
+                {isMockMode && (
+                  <div className="bg-primary/5 border border-primary/10 text-muted-foreground text-xs p-3 rounded-lg flex gap-2 items-start">
+                    <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
+                    <p>
+                      Pre-filled demo credentials:<br />
+                      Email: <code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_EMAIL}</code><br />
+                      Password: <code className="bg-background px-1 rounded font-semibold text-primary">{DEMO_PASSWORD}</code>
+                    </p>
+                  </div>
+                )}
 
                 <div className="space-y-1">
                   <Label htmlFor="email">Email Address</Label>
@@ -845,7 +841,7 @@ export default function UpdateTreePage({ params }: PageProps) {
           <Link href={`/tree/${tree.id}`} className="text-xs text-muted-foreground hover:text-primary flex items-center gap-1 font-semibold">
             <ArrowLeft className="h-3.5 w-3.5" /> Back to Tree Details
           </Link>
-          <Badge variant="outline" className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground border-border/80 bg-muted px-2 py-0.5">
+          <Badge variant="outline" className="text-[11px] uppercase font-bold tracking-wider text-muted-foreground border-border/80 bg-muted px-2 py-0.5">
             Tree #{tree.id}
           </Badge>
         </div>
@@ -862,7 +858,7 @@ export default function UpdateTreePage({ params }: PageProps) {
               />
             </div>
             <div className="flex flex-col min-w-0">
-              <span className="text-[10px] font-bold text-primary uppercase tracking-widest leading-none mb-1">
+              <span className="text-[11px] font-bold text-primary uppercase tracking-widest leading-none mb-1">
                 Registry Profile
               </span>
               <h1 className="text-sm font-extrabold text-foreground truncate leading-tight">
@@ -894,7 +890,7 @@ export default function UpdateTreePage({ params }: PageProps) {
         {gpsStatus && (
           <div className="bg-blue-500/5 border border-blue-500/10 text-blue-600 text-xs p-3.5 rounded-xl flex gap-2 items-center animate-pulse">
             <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-600" />
-            <span className="font-semibold uppercase tracking-wider text-[9px]">{gpsStatus}</span>
+            <span className="font-semibold uppercase tracking-wider text-[11px]">{gpsStatus}</span>
           </div>
         )}
 
@@ -916,9 +912,15 @@ export default function UpdateTreePage({ params }: PageProps) {
                   <SelectValue placeholder="Select Status" />
                 </SelectTrigger>
                 <SelectContent className="bg-card border-border">
-                  <SelectItem value="Healthy" className="text-sm font-medium text-emerald-600 hover:bg-emerald-500/10">💚 Healthy</SelectItem>
-                  <SelectItem value="Needs Attention" className="text-sm font-medium text-amber-600 hover:bg-amber-500/10">💛 Needs Attention</SelectItem>
-                  <SelectItem value="Dead" className="text-sm font-medium text-rose-600 hover:bg-rose-500/10">❤️ Dead</SelectItem>
+                  <SelectItem value="Healthy" className="text-sm font-medium text-emerald-600 hover:bg-emerald-500/10">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 mr-1.5" />Healthy
+                  </SelectItem>
+                  <SelectItem value="Needs Attention" className="text-sm font-medium text-amber-600 hover:bg-amber-500/10">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500 mr-1.5" />Needs Attention
+                  </SelectItem>
+                  <SelectItem value="Dead" className="text-sm font-medium text-rose-600 hover:bg-rose-500/10">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-rose-500 mr-1.5" />Dead
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -1026,7 +1028,7 @@ export default function UpdateTreePage({ params }: PageProps) {
                         <p className="text-xs font-semibold text-foreground">
                           Tap to Take Photo
                         </p>
-                        <p className="text-[10px] text-muted-foreground mt-1">
+                        <p className="text-[11px] text-muted-foreground mt-1">
                           Camera opens instantly on mobile devices
                         </p>
                       </div>
@@ -1080,7 +1082,8 @@ export default function UpdateTreePage({ params }: PageProps) {
           </form>
         </Card>
 
-        {/* Collapsible Action C: Edit Tree Details */}
+        {/* Collapsible Action C: Edit Tree Details (admin only) */}
+        {isAdmin && (
         <Card className="border-border bg-card shadow-md">
           <button
             type="button"
@@ -1091,7 +1094,7 @@ export default function UpdateTreePage({ params }: PageProps) {
               <CardTitle className="text-xs font-bold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
                 Edit Tree Details
               </CardTitle>
-              <CardDescription className="text-[10px] text-muted-foreground mt-0.5">
+              <CardDescription className="text-[11px] text-muted-foreground mt-0.5">
                 Correct core planter, species, location or banner photo
               </CardDescription>
             </div>
@@ -1221,6 +1224,7 @@ export default function UpdateTreePage({ params }: PageProps) {
             </form>
           )}
         </Card>
+        )}
       </div>
     </div>
   );
